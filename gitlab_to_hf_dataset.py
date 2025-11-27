@@ -22,9 +22,18 @@ class GitLabDatasetDownloader:
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
         
-        self.server_url = self.config['gitlab']['server_url'].rstrip('/')
-        self.access_token = self.config['gitlab']['access_token']
-        self.project_id = quote(self.config['gitlab']['project_id'], safe='')
+        # Source mode: gitlab or local
+        self.source_mode = self.config.get('source_mode', 'gitlab')
+        self.local_repo_path = Path(self.config.get('local_repo_path', '')) if self.source_mode == 'local' else None
+        
+        # GitLab configuration (only needed for gitlab mode)
+        if self.source_mode == 'gitlab':
+            self.server_url = self.config['gitlab']['server_url'].rstrip('/')
+            self.access_token = self.config['gitlab']['access_token']
+            self.project_id = quote(self.config['gitlab']['project_id'], safe='')
+            self.headers = {
+                'PRIVATE-TOKEN': self.access_token
+            }
         
         self.output_dir = Path(self.config['dataset']['output_dir'])
         self.audio_dir = self.output_dir / self.config['dataset']['audio_dir']
@@ -33,16 +42,43 @@ class GitLabDatasetDownloader:
         self.text_source = self.config['dataset'].get('text_source', 'transcription')
         self.edit_history_selection = self.config['dataset'].get('edit_history_selection', 'initial_import')
         
-        self.headers = {
-            'PRIVATE-TOKEN': self.access_token
-        }
-        
         # Create output directories
         self.output_dir.mkdir(exist_ok=True)
         self.audio_dir.mkdir(exist_ok=True)
     
-    def list_repository_tree(self, path: str = "", recursive: bool = True) -> List[Dict]:
-        """List files in the repository."""
+    def list_repository_tree_local(self, path: str = "", recursive: bool = True) -> List[Dict]:
+        """List files in the local repository."""
+        import os
+        
+        all_items = []
+        search_path = self.local_repo_path / path if path else self.local_repo_path
+        
+        if recursive:
+            # Recursively walk the directory
+            for root, dirs, files in os.walk(search_path):
+                for file in files:
+                    file_path = Path(root) / file
+                    rel_path = file_path.relative_to(self.local_repo_path)
+                    all_items.append({
+                        'name': file,
+                        'path': str(rel_path),
+                        'type': 'blob'
+                    })
+        else:
+            # List only top-level items
+            if search_path.exists():
+                for item in search_path.iterdir():
+                    rel_path = item.relative_to(self.local_repo_path)
+                    all_items.append({
+                        'name': item.name,
+                        'path': str(rel_path),
+                        'type': 'tree' if item.is_dir() else 'blob'
+                    })
+        
+        return all_items
+    
+    def list_repository_tree_gitlab(self, path: str = "", recursive: bool = True) -> List[Dict]:
+        """List files in the GitLab repository."""
         url = f"{self.server_url}/api/v4/projects/{self.project_id}/repository/tree"
         params = {
             'path': path,
@@ -72,13 +108,39 @@ class GitLabDatasetDownloader:
         
         return all_items
     
-    def download_file(self, file_path: str, output_path: Path, is_lfs: bool = False) -> bool:
+    def list_repository_tree(self, path: str = "", recursive: bool = True) -> List[Dict]:
+        """List files in the repository (supports both gitlab and local modes)."""
+        if self.source_mode == 'local':
+            return self.list_repository_tree_local(path, recursive)
+        else:
+            return self.list_repository_tree_gitlab(path, recursive)
+    
+    def download_file_local(self, file_path: str, output_path: Path) -> bool:
+        """Copy a file from local repository.
+        
+        Args:
+            file_path: Path to file in repository (relative)
+            output_path: Local path to save file
+        """
+        try:
+            source_path = self.local_repo_path / file_path
+            if not source_path.exists():
+                print(f"File not found: {source_path}")
+                return False
+            
+            import shutil
+            shutil.copy2(source_path, output_path)
+            return True
+        except Exception as e:
+            print(f"Error copying {file_path}: {e}")
+            return False
+    
+    def download_file_gitlab(self, file_path: str, output_path: Path) -> bool:
         """Download a file from GitLab repository.
         
         Args:
             file_path: Path to file in repository
             output_path: Local path to save file
-            is_lfs: If True, download via LFS; if False, try regular download first
         """
         url = f"{self.server_url}/api/v4/projects/{self.project_id}/repository/files/{quote(file_path, safe='')}/raw"
         
@@ -166,11 +228,27 @@ class GitLabDatasetDownloader:
             print(f"Error downloading {file_path}: {e}")
             return False
     
+    def download_file(self, file_path: str, output_path: Path) -> bool:
+        """Download/copy a file (supports both gitlab and local modes).
+        
+        Args:
+            file_path: Path to file in repository
+            output_path: Local path to save file
+        """
+        if self.source_mode == 'local':
+            return self.download_file_local(file_path, output_path)
+        else:
+            return self.download_file_gitlab(file_path, output_path)
+    
     def explore_repository(self):
         """Explore the repository structure to understand the layout."""
         print("Exploring repository structure...")
-        print(f"Server: {self.server_url}")
-        print(f"Project: {self.config['gitlab']['project_id']}")
+        print(f"Source mode: {self.source_mode}")
+        if self.source_mode == 'local':
+            print(f"Local path: {self.local_repo_path}")
+        else:
+            print(f"Server: {self.server_url}")
+            print(f"Project: {self.config['gitlab']['project_id']}")
         print()
         
         try:

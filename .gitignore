@@ -32,7 +32,7 @@ wheels/
 
 # Dataset output
 huggingface_dataset/
-Lingao/
+download/
 
 # IDE
 .idea/
