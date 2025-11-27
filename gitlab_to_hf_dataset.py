@@ -390,7 +390,10 @@ class GitLabDatasetDownloader:
                 print(f"  Found {len(results)} audio-transcription pairs")
                 
                 # Add results, but only up to max_records
-                if len(all_results) < max_records:
+                if max_records == float('inf'):
+                    # No limit, add all results
+                    all_results.extend(results)
+                elif len(all_results) < max_records:
                     remaining = int(max_records - len(all_results))
                     all_results.extend(results[:remaining])
                     
