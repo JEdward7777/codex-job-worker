@@ -1,0 +1,10 @@
+[project]
+name = "audio-text-tests"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "mutagen>=1.47.0",
+    "pyyaml>=6.0.3",
+    "requests>=2.32.5",
+]
