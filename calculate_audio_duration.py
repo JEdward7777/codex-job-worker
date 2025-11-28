@@ -4,7 +4,9 @@ Calculate total duration of audio files in a directory.
 Supports various audio formats including m4a, mp3, wav, flac, ogg, webm.
 """
 
+import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import List, Tuple
@@ -16,7 +18,66 @@ def get_audio_duration(file_path: Path) -> float:
     Returns 0 if file cannot be read or is not a valid audio file.
     """
     try:
-        # Try using mutagen first (handles most formats)
+        # Try using ffprobe first (most reliable for all formats including webm)
+        try:
+            result = subprocess.run(
+                [
+                    'ffprobe',
+                    '-v', 'error',
+                    '-show_entries', 'format=duration',
+                    '-of', 'default=noprint_wrappers=1:nokey=1',
+                    str(file_path)
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                duration_str = result.stdout.strip()
+                if duration_str != 'N/A':
+                    return float(duration_str)
+            
+            # If duration not in metadata, decode the file to get actual duration
+            result = subprocess.run(
+                [
+                    'ffmpeg',
+                    '-i', str(file_path),
+                    '-f', 'null',
+                    '-'
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            # Parse duration from ffmpeg output
+            for line in result.stderr.split('\n'):
+                if 'Duration:' in line and 'N/A' not in line:
+                    # Format: Duration: 00:00:05.23, start: 0.000000, bitrate: 128 kb/s
+                    duration_part = line.split('Duration:')[1].split(',')[0].strip()
+                    h, m, s = duration_part.split(':')
+                    return int(h) * 3600 + int(m) * 60 + float(s)
+                elif 'time=' in line:
+                    # Get the last time value from progress output
+                    time_parts = line.split('time=')
+                    if len(time_parts) > 1:
+                        time_str = time_parts[-1].split()[0]
+                        if ':' in time_str:
+                            parts = time_str.split(':')
+                            if len(parts) == 3:
+                                h, m, s = parts
+                                duration = int(h) * 3600 + int(m) * 60 + float(s)
+                                # Keep updating with the latest time value
+                                if duration > 0:
+                                    last_duration = duration
+            
+            # Return the last duration found
+            if 'last_duration' in locals():
+                return last_duration
+                
+        except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
+            pass
+        
+        # Fallback to mutagen (handles most formats with duration in metadata)
         try:
             from mutagen import File
             audio = File(file_path)
@@ -25,15 +86,6 @@ def get_audio_duration(file_path: Path) -> float:
         except ImportError:
             pass
         
-        # Fallback to pydub if mutagen not available
-        try:
-            from pydub import AudioSegment
-            audio = AudioSegment.from_file(str(file_path))
-            return len(audio) / 1000.0  # Convert milliseconds to seconds
-        except ImportError:
-            pass
-        
-        print(f"Warning: Could not read {file_path.name} - install mutagen or pydub")
         return 0
         
     except Exception as e:
