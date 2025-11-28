@@ -183,7 +183,8 @@ class TTSDatasetPreparer:
                 'text': transcription,
                 'speaker_id': speaker_id,
                 'duration': duration,
-                'file_name': filename
+                'file_name': filename,
+                'audio_path': str(audio_path)  # Keep original path for later
             }
             
             examples.append(example)
@@ -262,7 +263,8 @@ class TTSDatasetPreparer:
             'text': Value('string'),
             'speaker_id': Value('int32'),
             'duration': Value('float32'),
-            'file_name': Value('string')
+            'file_name': Value('string'),
+            'audio_path': Value('string')  # Keep original path
         })
         
         # Create datasets
@@ -291,24 +293,65 @@ class TTSDatasetPreparer:
         output_dir: Path
     ):
         """
-        Save HuggingFace dataset to disk.
+        Save dataset in CSV + audio folder format (compatible with HuggingFace audiofolder).
         
         Args:
             dataset: HuggingFace DatasetDict
             output_dir: Output directory
         """
-        logger.info(f"Saving dataset to {output_dir}")
+        import shutil
+        
+        logger.info(f"Saving dataset to {output_dir} in CSV + audio format")
         
         output_dir.mkdir(parents=True, exist_ok=True)
-        dataset.save_to_disk(str(output_dir))
         
-        logger.info(f"Dataset saved successfully")
+        # Save each split
+        for split_name, split_dataset in dataset.items():
+            split_dir = output_dir / split_name
+            split_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create audio subdirectory
+            audio_dir = split_dir / "audio"
+            audio_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Prepare metadata rows
+            metadata_rows = []
+            
+            logger.info(f"Saving {split_name} split ({len(split_dataset)} examples)...")
+            for example in tqdm(split_dataset, desc=f"Saving {split_name}"):
+                # Use the stored audio_path
+                source_audio = Path(example['audio_path'])
+                dest_audio = audio_dir / source_audio.name
+                
+                if not dest_audio.exists() and source_audio.exists():
+                    shutil.copy2(source_audio, dest_audio)
+                
+                # Add metadata row
+                metadata_rows.append({
+                    'file_name': source_audio.name,
+                    'transcription': example['text'],
+                    'speaker_id': example['speaker_id'],
+                    'duration': example['duration']
+                })
+            
+            # Write metadata.csv
+            metadata_path = split_dir / "metadata.csv"
+            with open(metadata_path, 'w', encoding='utf-8', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=['file_name', 'transcription', 'speaker_id', 'duration'])
+                writer.writeheader()
+                writer.writerows(metadata_rows)
+            
+            logger.info(f"  Saved {split_name} to {split_dir}")
+            logger.info(f"    Audio files: {len(metadata_rows)}")
+            logger.info(f"    Metadata: {metadata_path}")
+        
+        logger.info(f"\nDataset saved successfully in CSV + audio format")
         
         # Print dataset info
         logger.info("\nDataset structure:")
         for split_name, split_dataset in dataset.items():
             logger.info(f"  {split_name}: {len(split_dataset)} examples")
-            logger.info(f"    Features: {list(split_dataset.features.keys())}")
+            logger.info(f"    Location: {output_dir / split_name}")
     
     def print_statistics(
         self,
