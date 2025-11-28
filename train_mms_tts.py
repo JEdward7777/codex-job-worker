@@ -92,7 +92,7 @@ class TTSTrainingConfigGenerator:
             "push_to_hub": push_to_hub,
             "hub_model_id": hub_model_id if hub_model_id else f"mms-tts-{language_code}-finetuned",
             "report_to": ["tensorboard"],  # Can add "wandb" if configured
-            "overwrite_output_dir": True,
+            "overwrite_output_dir": False,  # Allow automatic checkpoint resumption
             "output_dir": output_dir,
             
             # Dataset info - using local dataset (CSV format uses "transcription" column)

@@ -1,0 +1,47 @@
+diff --git a/run_vits_finetuning.py b/run_vits_finetuning.py
+index 3dacf01..d71dff9 100644
+--- a/run_vits_finetuning.py
++++ b/run_vits_finetuning.py
+@@ -33,7 +33,7 @@ from transformers.feature_extraction_utils import BatchFeature
+ from transformers.optimization import get_scheduler
+ from transformers.trainer_pt_utils import LengthGroupedSampler
+ from transformers.trainer_utils import get_last_checkpoint, is_main_process
+-from transformers.utils import send_example_telemetry
++# from transformers.utils import send_example_telemetry  # Removed in newer transformers versions
+ from utils import plot_alignment_to_numpy, plot_spectrogram_to_numpy, VitsDiscriminator, VitsModelForPreTraining, VitsFeatureExtractor, slice_segments, VitsConfig, uromanize
+ 
+ 
+@@ -537,7 +537,7 @@ def main():
+ 
+     # Sending telemetry. Tracking the example usage helps us better allocate resources to maintain them. The
+     # information sent is the one passed as arguments along with your Python/PyTorch versions.
+-    send_example_telemetry("run_vits_finetuning", model_args, data_args)
++    # send_example_telemetry("run_vits_finetuning", model_args, data_args)  # Removed in newer transformers versions
+ 
+     # 2. Setup logging
+     logging.basicConfig(
+diff --git a/utils/plot.py b/utils/plot.py
+index 34412d6..f9cc90e 100644
+--- a/utils/plot.py
++++ b/utils/plot.py
+@@ -27,8 +27,8 @@ def plot_spectrogram_to_numpy(spectrogram):
+     plt.tight_layout()
+ 
+     fig.canvas.draw()
+-    data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+-    data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
++    data = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
++    data = data.reshape(fig.canvas.get_width_height()[::-1] + (4,))[:, :, :3]  # Remove alpha channel
+     plt.close()
+     return data
+ 
+@@ -56,7 +56,7 @@ def plot_alignment_to_numpy(alignment, info=None):
+     plt.tight_layout()
+ 
+     fig.canvas.draw()
+-    data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
+-    data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
++    data = np.frombuffer(fig.canvas.buffer_rgba(), dtype=np.uint8)
++    data = data.reshape(fig.canvas.get_width_height()[::-1] + (4,))[:, :, :3]  # Remove alpha channel
+     plt.close()
+     return data
