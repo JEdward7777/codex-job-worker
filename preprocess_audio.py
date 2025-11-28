@@ -40,7 +40,9 @@ class AudioPreprocessor:
         target_sr: int = 16000,
         target_channels: int = 1,
         normalize: bool = True,
-        target_bit_depth: int = 16
+        target_bit_depth: int = 16,
+        trim_silence: bool = True,
+        silence_threshold: float = 20.0
     ):
         """
         Initialize the audio preprocessor.
@@ -50,17 +52,54 @@ class AudioPreprocessor:
             target_channels: Number of channels (1 for mono, 2 for stereo)
             normalize: Whether to normalize audio amplitude
             target_bit_depth: Target bit depth (16 or 24)
+            trim_silence: Whether to trim leading and trailing silence
+            silence_threshold: Threshold in dB below reference for silence detection (default: 20.0)
         """
         self.target_sr = target_sr
         self.target_channels = target_channels
         self.normalize = normalize
         self.target_bit_depth = target_bit_depth
+        self.trim_silence = trim_silence
+        self.silence_threshold = silence_threshold
+        
+        # Track silence trimming statistics
+        self.trim_stats = []  # List of (input_path, output_path, silence_removed_seconds)
         
         # Supported input formats
         self.supported_formats = {
-            '.wav', '.mp3', '.flac', '.ogg', '.m4a', 
+            '.wav', '.mp3', '.flac', '.ogg', '.m4a',
             '.webm', '.opus', '.aac', '.wma'
         }
+    
+    def trim_silence_from_audio(self, audio: np.ndarray, sr: int) -> tuple[np.ndarray, float]:
+        """
+        Trim leading and trailing silence from audio.
+        
+        Args:
+            audio: Input audio array
+            sr: Sample rate of the audio
+            
+        Returns:
+            Tuple of (trimmed audio array, silence removed in seconds)
+        """
+        # Use librosa's trim function to remove silence
+        # top_db: threshold in dB below reference to consider as silence
+        trimmed_audio, _ = librosa.effects.trim(
+            audio,
+            top_db=self.silence_threshold,
+            frame_length=2048,
+            hop_length=512
+        )
+        
+        # Calculate silence removed
+        original_duration = len(audio) / sr
+        trimmed_duration = len(trimmed_audio) / sr
+        silence_removed = original_duration - trimmed_duration
+        
+        if silence_removed > 0.1:  # Log if more than 0.1 seconds removed
+            logger.debug(f"Trimmed {silence_removed:.2f}s of silence (original: {original_duration:.2f}s, trimmed: {trimmed_duration:.2f}s)")
+        
+        return trimmed_audio, silence_removed
     
     def normalize_audio(self, audio: np.ndarray, target_level: float = -20.0) -> np.ndarray:
         """
@@ -139,6 +178,14 @@ class AudioPreprocessor:
                     sr=self.target_sr,
                     mono=(self.target_channels == 1)
                 )
+            
+            # Trim silence if requested (before normalization for better results)
+            silence_removed = 0.0
+            if self.trim_silence:
+                audio, silence_removed = self.trim_silence_from_audio(audio, self.target_sr)
+                # Track trimming statistics
+                if silence_removed > 0:
+                    self.trim_stats.append((str(input_path), str(output_path), silence_removed))
             
             # Normalize if requested
             if self.normalize:
@@ -231,6 +278,20 @@ class AudioPreprocessor:
                 failed += 1
         
         return successful, failed
+    
+    def get_top_trimmed_files(self, n: int = 5) -> List[tuple]:
+        """
+        Get the top N files with the most silence trimmed.
+        
+        Args:
+            n: Number of top files to return
+            
+        Returns:
+            List of tuples (input_path, output_path, silence_removed_seconds)
+        """
+        # Sort by silence removed (descending)
+        sorted_stats = sorted(self.trim_stats, key=lambda x: x[2], reverse=True)
+        return sorted_stats[:n]
     
     def process_with_metadata(
         self,
@@ -370,6 +431,23 @@ def main():
         help="Disable audio normalization"
     )
     parser.add_argument(
+        "--trim_silence",
+        action="store_true",
+        default=True,
+        help="Trim leading and trailing silence (default: True)"
+    )
+    parser.add_argument(
+        "--no_trim_silence",
+        action="store_true",
+        help="Disable silence trimming"
+    )
+    parser.add_argument(
+        "--silence_threshold",
+        type=float,
+        default=20.0,
+        help="Threshold in dB below reference for silence detection (default: 20.0)"
+    )
+    parser.add_argument(
         "--recursive",
         action="store_true",
         default=True,
@@ -407,6 +485,8 @@ def main():
         channels = audio_config.get('channels', 1)
         bit_depth = audio_config.get('bit_depth', 16)
         normalize = audio_config.get('normalize', True)
+        trim_silence = audio_config.get('trim_silence', True)
+        silence_threshold = audio_config.get('silence_threshold', 20.0)
         
         # Get paths from config
         paths = config.get('paths', {})
@@ -419,6 +499,8 @@ def main():
         channels = args.channels
         bit_depth = args.bit_depth
         normalize = args.normalize and not args.no_normalize
+        trim_silence = args.trim_silence and not args.no_trim_silence
+        silence_threshold = args.silence_threshold
         
         if not args.input_dir or not args.output_dir:
             logger.error("Either --config or both --input_dir and --output_dir must be provided")
@@ -433,7 +515,9 @@ def main():
         target_sr=sample_rate,
         target_channels=channels,
         normalize=normalize,
-        target_bit_depth=bit_depth
+        target_bit_depth=bit_depth,
+        trim_silence=trim_silence,
+        silence_threshold=silence_threshold
     )
     
     # Validate input directory
@@ -446,7 +530,9 @@ def main():
     
     # Process files
     logger.info(f"Processing audio files from {input_dir} to {output_dir}")
-    logger.info(f"Settings: {sample_rate}Hz, {channels}ch, {bit_depth}-bit, normalize={normalize}")
+    logger.info(f"Settings: {sample_rate}Hz, {channels}ch, {bit_depth}-bit, normalize={normalize}, trim_silence={trim_silence}")
+    if trim_silence:
+        logger.info(f"Silence threshold: {silence_threshold} dB")
     
     # Check if we have metadata file
     if input_metadata and input_metadata.exists():
@@ -474,6 +560,28 @@ def main():
     logger.info(f"Successful: {successful}")
     logger.info(f"Failed: {failed}")
     logger.info(f"Total: {successful + failed}")
+    
+    # Report top files with most silence trimmed
+    if trim_silence and preprocessor.trim_stats:
+        logger.info(f"\n{'='*80}")
+        logger.info("TOP 5 FILES WITH MOST SILENCE TRIMMED:")
+        logger.info(f"{'='*80}")
+        
+        top_trimmed = preprocessor.get_top_trimmed_files(n=5)
+        
+        if top_trimmed:
+            for i, (input_path, output_path, silence_removed) in enumerate(top_trimmed, 1):
+                logger.info(f"\n#{i} - Trimmed {silence_removed:.2f} seconds:")
+                logger.info(f"  Original:  {input_path}")
+                logger.info(f"  Processed: {output_path}")
+        else:
+            logger.info("No files had significant silence trimmed (< 0.01s)")
+        
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Total files with silence trimmed: {len(preprocessor.trim_stats)}")
+        total_silence = sum(stat[2] for stat in preprocessor.trim_stats)
+        logger.info(f"Total silence removed: {total_silence:.2f} seconds ({total_silence/60:.2f} minutes)")
+        logger.info(f"{'='*80}\n")
     
     return 0 if failed == 0 else 1
 
