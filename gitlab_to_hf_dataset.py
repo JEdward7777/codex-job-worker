@@ -453,7 +453,18 @@ class GitLabDatasetDownloader:
             return None
             
         elif self.text_source == 'transcription':
-            # This is handled in extract_audio_transcriptions
+            # Extract transcription from audio attachment
+            metadata = cell.get('metadata', {})
+            attachments = metadata.get('attachments', {})
+            selected_audio_id = metadata.get('selectedAudioId')
+            
+            if selected_audio_id and selected_audio_id in attachments:
+                audio_info = attachments[selected_audio_id]
+                transcription_data = audio_info.get('transcription', {})
+                text = transcription_data.get('content', '')
+                # Apply filtering (including romanization if enabled)
+                return self.filter_text(text)
+            
             return None
             
         return None
@@ -484,18 +495,14 @@ class GitLabDatasetDownloader:
                 if audio_info.get('isDeleted', False) or audio_info.get('isMissing', False):
                     continue
                 
-                # Get text based on configured source
+                # Get text using extract_text_from_cell for all text sources
+                text = self.extract_text_from_cell(cell)
+                
+                # Get language from transcription if using transcription source
+                language = None
                 if self.text_source == 'transcription':
-                    # Use transcription from audio attachment
                     transcription_data = audio_info.get('transcription', {})
-                    text = transcription_data.get('content', '')
                     language = transcription_data.get('language')
-                    # Apply filtering (including romanization if enabled)
-                    text = self.filter_text(text)
-                else:
-                    # Use value or edit_history (already filtered in extract_text_from_cell)
-                    text = self.extract_text_from_cell(cell)
-                    language = None
                 
                 # Try to find the actual audio file path
                 actual_audio_path = audio_files_map.get(selected_audio_id)
