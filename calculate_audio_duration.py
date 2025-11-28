@@ -181,7 +181,9 @@ def main():
     
     if valid_files > 0:
         avg_duration = total_duration / valid_files
+        max_duration = max(duration for _, duration in results if duration > 0)
         print(f"Average duration per file: {format_duration(avg_duration)}")
+        print(f"Maximum duration: {format_duration(max_duration)}")
         print()
     
     # Provide context for TTS/STT training
