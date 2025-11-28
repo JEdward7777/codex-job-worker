@@ -326,9 +326,9 @@ class TTSDatasetPreparer:
                 if not dest_audio.exists() and source_audio.exists():
                     shutil.copy2(source_audio, dest_audio)
                 
-                # Add metadata row
+                # Add metadata row with audio/ prefix for the subdirectory
                 metadata_rows.append({
-                    'file_name': source_audio.name,
+                    'file_name': f"audio/{source_audio.name}",
                     'transcription': example['text'],
                     'speaker_id': example['speaker_id'],
                     'duration': example['duration']

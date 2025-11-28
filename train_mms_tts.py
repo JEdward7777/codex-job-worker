@@ -95,10 +95,10 @@ class TTSTrainingConfigGenerator:
             "overwrite_output_dir": True,
             "output_dir": output_dir,
             
-            # Dataset info - using local dataset
+            # Dataset info - using local dataset (CSV format uses "transcription" column)
             "dataset_name": str(dataset_path),
             "audio_column_name": "audio",
-            "text_column_name": "text",
+            "text_column_name": "transcription",
             "train_split_name": "train",
             "eval_split_name": "validation",
             "speaker_id_column_name": "speaker_id",
@@ -195,6 +195,53 @@ def setup_finetune_vits():
     return True
 
 
+def convert_discriminator_checkpoint(language_code: str, output_dir: Path, finetune_dir: Path) -> bool:
+    """
+    Convert MMS checkpoint to include discriminator for training.
+    
+    Args:
+        language_code: ISO 639-3 language code (e.g., 'hak')
+        output_dir: Directory to save the converted checkpoint
+        finetune_dir: Path to finetune-hf-vits directory
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    # Check if already converted
+    if output_dir.exists() and (output_dir / "config.json").exists():
+        logger.info(f"Converted checkpoint already exists at {output_dir}")
+        return True
+    
+    logger.info(f"Converting discriminator checkpoint for language: {language_code}")
+    logger.info(f"Output directory: {output_dir}")
+    
+    convert_script = finetune_dir / "convert_original_discriminator_checkpoint.py"
+    if not convert_script.exists():
+        logger.error(f"Conversion script not found: {convert_script}")
+        return False
+    
+    # Create output directory
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Run conversion script
+    cmd = [
+        "python",
+        str(convert_script),
+        "--language_code", language_code,
+        "--pytorch_dump_folder_path", str(output_dir)
+    ]
+    
+    logger.info(f"Running: {' '.join(cmd)}")
+    
+    try:
+        subprocess.run(cmd, check=True)
+        logger.info("Discriminator checkpoint converted successfully")
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to convert checkpoint: {e}")
+        return False
+
+
 def run_training(config_path: Path, finetune_dir: Path):
     """
     Run the official finetune-hf-vits training script.
@@ -223,7 +270,7 @@ def run_training(config_path: Path, finetune_dir: Path):
     logger.info("")
     
     try:
-        subprocess.run(cmd, check=True, cwd=finetune_dir)
+        subprocess.run(cmd, check=True)
         logger.info("\nTraining completed successfully!")
         return True
     except subprocess.CalledProcessError as e:
@@ -320,12 +367,46 @@ def main():
         return 0
     
     # Setup finetune-hf-vits
+    finetune_dir = Path("finetune-hf-vits")
     if not setup_finetune_vits():
         logger.error("Failed to setup finetune-hf-vits")
         return 1
     
+    # Check if we need to convert the discriminator checkpoint
+    base_model = generator.language.get('base_model', '')
+    if base_model.startswith('facebook/mms-tts-'):
+        # Extract language code from model name (e.g., 'facebook/mms-tts-hak' -> 'hak')
+        language_code = base_model.split('-')[-1]
+        
+        # Get converted model path from config, or use default location
+        converted_model_dir = generator.paths.get('training_model')
+        if not converted_model_dir:
+            # Fallback: place near the dataset
+            dataset_parent = Path(dataset_path).parent
+            converted_model_dir = dataset_parent / f"mms-tts-{language_code}-train"
+        else:
+            converted_model_dir = Path(converted_model_dir)
+        
+        logger.info(f"\nChecking for training checkpoint with discriminator...")
+        logger.info(f"Base model: {base_model}")
+        logger.info(f"Language code: {language_code}")
+        logger.info(f"Training model path: {converted_model_dir}")
+        
+        # Convert the checkpoint if needed
+        if not convert_discriminator_checkpoint(language_code, converted_model_dir, finetune_dir):
+            logger.error("Failed to convert discriminator checkpoint")
+            return 1
+        
+        # Update the training config to use the converted model
+        logger.info(f"\nUpdating training config to use converted model: {converted_model_dir}")
+        with open(output_config_path, 'r') as f:
+            config_data = json.load(f)
+        config_data['model_name_or_path'] = str(converted_model_dir)
+        with open(output_config_path, 'w') as f:
+            json.dump(config_data, f, indent=4)
+        logger.info("Training config updated successfully")
+    
     # Run training
-    finetune_dir = Path("finetune-hf-vits")
     success = run_training(output_config_path, finetune_dir)
     
     return 0 if success else 1
