@@ -27,6 +27,7 @@ class GitLabDatasetDownloader:
     
     def __init__(self, config_path: str = "config.yaml"):
         """Initialize with configuration from YAML file."""
+        print(f"Reading configuration from: {config_path}")
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
         
@@ -350,6 +351,48 @@ class GitLabDatasetDownloader:
             print(f"Returning original text")
             return text
     
+    def filter_text(self, text: str) -> Optional[str]:
+        """Apply all text filtering operations.
+        
+        This method consolidates all text filtering operations including:
+        - Removing HTML tags
+        - Replacing &nbsp; with spaces
+        - Stripping whitespace
+        - Replacing duplicate spaces with single spaces
+        - Romanizing text (if enabled)
+        
+        Args:
+            text: The text to filter
+            
+        Returns:
+            Filtered text or None if the text is empty after filtering
+        """
+        if not text:
+            return None
+        
+        import re
+        
+        # Remove HTML tags
+        text = re.sub(r'<[^>]+>', '', text)
+        
+        # Replace &nbsp; with actual space
+        text = text.replace('&nbsp;', ' ')
+        
+        # Strip leading/trailing whitespace
+        text = text.strip()
+        
+        # Replace duplicate spaces with single space
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Return None if text is empty after filtering
+        if not text:
+            return None
+        
+        # Apply romanization if enabled
+        text = self.romanize_text(text)
+        
+        return text
+    
     def extract_text_from_cell(self, cell: Dict) -> Optional[str]:
         """Extract text from a cell based on configured text_source.
         
@@ -362,14 +405,7 @@ class GitLabDatasetDownloader:
         if self.text_source == 'value':
             # Use current value field
             value = cell.get('value', '')
-            # Strip HTML tags if present
-            import re
-            text = re.sub(r'<[^>]+>', '', value)
-            text = text.strip() if text.strip() else None
-            # Apply uroman if enabled
-            if text:
-                text = self.romanize_text(text)
-            return text
+            return self.filter_text(value)
             
         elif self.text_source == 'edit_history':
             # Extract from edit history
@@ -385,30 +421,34 @@ class GitLabDatasetDownloader:
                     if edit.get('type') == 'initial-import':
                         value = edit.get('value', '')
                         if value and not value.strip().startswith('<'):
-                            text = value.strip()
-                            return self.romanize_text(text)
+                            filtered = self.filter_text(value)
+                            if filtered:
+                                return filtered
                 # Fallback to first plain text edit
                 for edit in edits:
                     value = edit.get('value', '')
                     if value and not value.strip().startswith('<'):
-                        text = value.strip()
-                        return self.romanize_text(text)
+                        filtered = self.filter_text(value)
+                        if filtered:
+                            return filtered
                         
             elif self.edit_history_selection == 'first':
                 # Use first edit with plain text
                 for edit in edits:
                     value = edit.get('value', '')
                     if value and not value.strip().startswith('<'):
-                        text = value.strip()
-                        return self.romanize_text(text)
+                        filtered = self.filter_text(value)
+                        if filtered:
+                            return filtered
                         
             elif self.edit_history_selection == 'last':
                 # Use last edit with plain text
                 for edit in reversed(edits):
                     value = edit.get('value', '')
                     if value and not value.strip().startswith('<'):
-                        text = value.strip()
-                        return self.romanize_text(text)
+                        filtered = self.filter_text(value)
+                        if filtered:
+                            return filtered
             
             return None
             
@@ -450,11 +490,10 @@ class GitLabDatasetDownloader:
                     transcription_data = audio_info.get('transcription', {})
                     text = transcription_data.get('content', '')
                     language = transcription_data.get('language')
-                    # Apply uroman if enabled
-                    if text:
-                        text = self.romanize_text(text)
+                    # Apply filtering (including romanization if enabled)
+                    text = self.filter_text(text)
                 else:
-                    # Use value or edit_history (already romanized in extract_text_from_cell)
+                    # Use value or edit_history (already filtered in extract_text_from_cell)
                     text = self.extract_text_from_cell(cell)
                     language = None
                 
