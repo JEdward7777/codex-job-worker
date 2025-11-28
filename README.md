@@ -42,9 +42,39 @@ uv sync
 
 ## Usage
 
-### 1. Explore Repository Structure
+The script uses Google Fire for a clean CLI interface. All commands support the `--config_path` parameter to specify a custom configuration file (defaults to `config.yaml`).
+
+### Getting Help
+
 ```bash
+# Show all available commands
 uv run python gitlab_to_hf_dataset.py
+
+# Or use --help
+uv run python gitlab_to_hf_dataset.py --help
+
+# Get help for a specific command
+uv run python gitlab_to_hf_dataset.py process --help
+uv run python gitlab_to_hf_dataset.py examine --help
+uv run python gitlab_to_hf_dataset.py debug --help
+uv run python gitlab_to_hf_dataset.py explore --help
+```
+
+### Basic Command Structure
+
+```bash
+# Using default config.yaml
+uv run python gitlab_to_hf_dataset.py <command>
+
+# Using custom config file
+uv run python gitlab_to_hf_dataset.py <command> --config_path=my_config.yaml
+```
+
+### Available Commands
+
+#### 1. Explore Repository Structure
+```bash
+uv run python gitlab_to_hf_dataset.py explore
 ```
 
 Shows:
@@ -53,14 +83,18 @@ Shows:
 - Number of audio files
 - Sample file paths
 
-### 2. Examine CODEX File Schema
+#### 2. Examine CODEX File Schema
 ```bash
+# Examine first CODEX file found
 uv run python gitlab_to_hf_dataset.py examine
+
+# Examine specific file
+uv run python gitlab_to_hf_dataset.py examine --json_path="files/target/GEN.codex"
 ```
 
 Downloads and displays the structure of a CODEX file to understand the data format.
 
-### 3. Debug Mode (Detailed Analysis)
+#### 3. Debug Mode (Detailed Analysis)
 ```bash
 uv run python gitlab_to_hf_dataset.py debug
 ```
@@ -70,7 +104,7 @@ Provides detailed information about:
 - Transcription availability
 - File matching status
 
-### 4. Process and Download Dataset
+#### 4. Process and Download Dataset
 ```bash
 uv run python gitlab_to_hf_dataset.py process
 ```
@@ -83,6 +117,27 @@ This will:
 5. Create `metadata.csv` in HuggingFace format
 
 **Note**: The script respects the `max_records` setting in `config.yaml`. Set it to a small number (e.g., 10) for testing, then set to `0` or `null` for full processing.
+
+### Using Custom Config Files
+
+You can specify a different configuration file for any command:
+
+```bash
+# Process with production config
+uv run python gitlab_to_hf_dataset.py process --config_path=config.prod.yaml
+
+# Explore with test config
+uv run python gitlab_to_hf_dataset.py explore --config_path=config.test.yaml
+
+# Debug with custom config
+uv run python gitlab_to_hf_dataset.py debug --config_path=my_config.yaml
+```
+
+This is useful for:
+- Testing with different GitLab repositories
+- Using different output directories
+- Switching between development and production settings
+- Managing multiple projects
 
 **Example output:**
 ```
@@ -144,10 +199,10 @@ dataset = load_dataset("audiofolder", data_dir="huggingface_dataset")
 
 ## Project Structure
 
-- `gitlab_to_hf_dataset.py` - Main script
-- `config.yaml` - Configuration (not committed to git)
+- `gitlab_to_hf_dataset.py` - Main script with Google Fire CLI
+- `config.yaml` - Default configuration (not committed to git - all `.yaml` files are ignored)
 - `pyproject.toml` - UV project configuration
-- `.gitignore` - Excludes config and output files
+- `.gitignore` - Excludes all YAML config files and output files
 - `README.md` - This file
 
 ## Notes

@@ -1,5 +1,5 @@
 # Configuration files with sensitive information
-config.yaml
+*.yaml
 
 # UV virtual environment
 .venv/

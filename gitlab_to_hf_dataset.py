@@ -9,6 +9,7 @@ import csv
 import json
 import yaml
 import requests
+import fire
 from pathlib import Path
 from urllib.parse import quote
 from typing import Dict, List, Optional
@@ -42,9 +43,9 @@ class GitLabDatasetDownloader:
         self.text_source = self.config['dataset'].get('text_source', 'transcription')
         self.edit_history_selection = self.config['dataset'].get('edit_history_selection', 'initial_import')
         
-        # Create output directories
-        self.output_dir.mkdir(exist_ok=True)
-        self.audio_dir.mkdir(exist_ok=True)
+        # Create output directories (including parent directories)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.audio_dir.mkdir(parents=True, exist_ok=True)
     
     def list_repository_tree_local(self, path: str = "", recursive: bool = True) -> List[Dict]:
         """List files in the local repository."""
@@ -240,7 +241,7 @@ class GitLabDatasetDownloader:
         else:
             return self.download_file_gitlab(file_path, output_path)
     
-    def explore_repository(self):
+    def explore(self):
         """Explore the repository structure to understand the layout."""
         print("Exploring repository structure...")
         print(f"Source mode: {self.source_mode}")
@@ -440,7 +441,23 @@ class GitLabDatasetDownloader:
         print(f"Mapped {len(audio_map)} audio IDs to file paths")
         return audio_map
     
-    def process_all_codex_files(self) -> List[Dict]:
+    def process(self):
+        """Process all CODEX files and create HuggingFace dataset."""
+        print("Processing all CODEX files and downloading audio...")
+        print()
+        
+        # Extract all audio-transcription pairs
+        pairs = self._process_all_codex_files()
+        
+        if pairs:
+            print(f"\nTotal audio-transcription pairs found: {len(pairs)}")
+            
+            # Download audio files and create CSV
+            self.download_audio_and_create_csv(pairs)
+        else:
+            print("No audio-transcription pairs found")
+    
+    def _process_all_codex_files(self) -> List[Dict]:
         """Process all CODEX files and extract audio-transcription pairs.
         
         Continues processing files until max_records complete pairs are found,
@@ -518,30 +535,18 @@ class GitLabDatasetDownloader:
         print(f"CSV file: {csv_path}")
         print(f"Audio files: {self.audio_dir}")
         print(f"Total records: {len(audio_transcription_pairs)}")
-
-
-def main():
-    """Main function to explore the repository."""
-    import sys
     
-    downloader = GitLabDatasetDownloader()
-    
-    print("=" * 60)
-    print("GitLab to HuggingFace Dataset Converter")
-    print("=" * 60)
-    print()
-    
-    # Check if we should debug a specific file
-    if len(sys.argv) > 1 and sys.argv[1] == "debug":
+    def debug(self):
+        """Debug mode: Examine LEV.codex in detail."""
         print("Debug mode: Examining LEV.codex in detail...")
         print()
         
         # Get all items and build audio map
-        items = downloader.list_repository_tree()
-        audio_map = downloader.build_audio_files_map(items)
+        items = self.list_repository_tree()
+        audio_map = self.build_audio_files_map(items)
         
         # Download LEV.codex
-        codex_data = downloader.download_json_file("files/target/LEV.codex")
+        codex_data = self.download_json_file("files/target/LEV.codex")
         
         if codex_data and 'cells' in codex_data:
             print(f"\nTotal cells in LEV.codex: {len(codex_data['cells'])}")
@@ -594,36 +599,16 @@ def main():
             print(f"\nSample audio IDs in map:")
             for audio_id in list(audio_map.keys())[:5]:
                 print(f"  {audio_id} -> {audio_map[audio_id]}")
-        
-        return
     
-    # Check if we should process and download
-    if len(sys.argv) > 1 and sys.argv[1] == "process":
-        print("Processing all CODEX files and downloading audio...")
-        print()
+    def examine(self, json_path: Optional[str] = None):
+        """Examine a specific JSON/CODEX file.
         
-        # Extract all audio-transcription pairs
-        pairs = downloader.process_all_codex_files()
-        
-        if pairs:
-            print(f"\nTotal audio-transcription pairs found: {len(pairs)}")
-            
-            # Download audio files and create CSV
-            downloader.download_audio_and_create_csv(pairs)
-        else:
-            print("No audio-transcription pairs found")
-        
-        return
-    
-    # Check if we should examine a specific JSON file
-    if len(sys.argv) > 1 and sys.argv[1] == "examine":
-        if len(sys.argv) > 2:
-            json_path = sys.argv[2]
-        else:
+        Args:
+            json_path: Path to the JSON file to examine. If not provided, uses first CODEX file found.
+        """
+        if not json_path:
             # Default to examining a codex file from files/targets
-            json_path = None
-            # We'll need to list files first to find a codex file
-            repo_info = downloader.explore_repository()
+            repo_info = self.explore()
             if repo_info and repo_info['codex_files']:
                 json_path = repo_info['codex_files'][0]['path']
             else:
@@ -633,7 +618,7 @@ def main():
         print(f"Downloading and examining: {json_path}")
         print()
         
-        data = downloader.download_json_file(json_path)
+        data = self.download_json_file(json_path)
         if data:
             print("JSON Structure:")
             print("-" * 60)
@@ -654,19 +639,77 @@ def main():
                     print(f"First item keys: {list(data[0].keys()) if isinstance(data[0], dict) else 'Not a dict'}")
         else:
             print("Failed to download JSON file")
-        return
+
+
+class CLI:
+    """GitLab to HuggingFace Dataset Converter CLI.
     
-    # First, let's explore the repository structure
-    repo_info = downloader.explore_repository()
+    Available commands:
+    - explore: Explore the repository structure
+    - examine: Examine a specific JSON/CODEX file
+    - debug: Debug mode with detailed analysis
+    - process: Process all CODEX files and create HuggingFace dataset
     
-    if repo_info and repo_info['codex_files']:
-        print("\nAvailable commands:")
-        print("\n1. Examine a CODEX file schema:")
-        print("   uv run python gitlab_to_hf_dataset.py examine")
-        print(f"   uv run python gitlab_to_hf_dataset.py examine {repo_info['codex_files'][0]['path']}")
-        print("\n2. Process all CODEX files and create HuggingFace dataset:")
-        print("   uv run python gitlab_to_hf_dataset.py process")
-        print(f"\n   (Will process up to {downloader.max_records} records as configured in config.yaml)")
+    All commands support --config_path parameter (default: config.yaml)
+    """
+    
+    def explore(self, config_path: str = "config.yaml"):
+        """Explore the repository structure to understand the layout.
+        
+        Args:
+            config_path: Path to configuration YAML file (default: config.yaml)
+        """
+        print("=" * 60)
+        print("GitLab to HuggingFace Dataset Converter")
+        print("=" * 60)
+        print()
+        downloader = GitLabDatasetDownloader(config_path=config_path)
+        downloader.explore()
+    
+    def examine(self, json_path: Optional[str] = None, config_path: str = "config.yaml"):
+        """Examine a specific JSON/CODEX file.
+        
+        Args:
+            json_path: Path to the JSON file to examine. If not provided, uses first CODEX file found.
+            config_path: Path to configuration YAML file (default: config.yaml)
+        """
+        print("=" * 60)
+        print("GitLab to HuggingFace Dataset Converter")
+        print("=" * 60)
+        print()
+        downloader = GitLabDatasetDownloader(config_path=config_path)
+        downloader.examine(json_path=json_path)
+    
+    def debug(self, config_path: str = "config.yaml"):
+        """Debug mode: Examine LEV.codex in detail.
+        
+        Args:
+            config_path: Path to configuration YAML file (default: config.yaml)
+        """
+        print("=" * 60)
+        print("GitLab to HuggingFace Dataset Converter")
+        print("=" * 60)
+        print()
+        downloader = GitLabDatasetDownloader(config_path=config_path)
+        downloader.debug()
+    
+    def process(self, config_path: str = "config.yaml"):
+        """Process all CODEX files and create HuggingFace dataset.
+        
+        Args:
+            config_path: Path to configuration YAML file (default: config.yaml)
+        """
+        print("=" * 60)
+        print("GitLab to HuggingFace Dataset Converter")
+        print("=" * 60)
+        print()
+        downloader = GitLabDatasetDownloader(config_path=config_path)
+        downloader.process()
+
+
+def main():
+    """Main entry point using Google Fire."""
+    fire.Fire(CLI)
 
 
 if __name__ == "__main__":
