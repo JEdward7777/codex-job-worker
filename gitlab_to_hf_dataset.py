@@ -14,6 +14,13 @@ from pathlib import Path
 from urllib.parse import quote
 from typing import Dict, List, Optional
 
+try:
+    from uroman import Uroman
+    UROMAN_AVAILABLE = True
+except ImportError:
+    UROMAN_AVAILABLE = False
+    Uroman = None
+
 
 class GitLabDatasetDownloader:
     """Downloads audio files and transcriptions from GitLab."""
@@ -42,6 +49,21 @@ class GitLabDatasetDownloader:
         self.max_records = self.config['dataset'].get('max_records', 0)
         self.text_source = self.config['dataset'].get('text_source', 'transcription')
         self.edit_history_selection = self.config['dataset'].get('edit_history_selection', 'initial_import')
+        
+        # Uroman configuration
+        uroman_config = self.config.get('uroman', {})
+        self.uroman_enabled = uroman_config.get('enabled', False)
+        self.uroman_language = uroman_config.get('language', None)
+        
+        # Validate uroman availability if enabled
+        if self.uroman_enabled and not UROMAN_AVAILABLE:
+            raise ImportError(
+                "uroman is enabled in config but not installed. "
+                "Install it with: uv add uroman"
+            )
+        
+        # Initialize uroman instance if enabled
+        self.uroman_instance = Uroman() if self.uroman_enabled else None
         
         # Create output directories (including parent directories)
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -307,6 +329,27 @@ class GitLabDatasetDownloader:
         
         return None
     
+    def romanize_text(self, text: str) -> str:
+        """Romanize text using uroman if enabled.
+        
+        Args:
+            text: The text to romanize
+            
+        Returns:
+            Romanized text if uroman is enabled, otherwise original text
+        """
+        if not self.uroman_enabled or not text or not self.uroman_instance:
+            return text
+        
+        try:
+            # Use uroman to romanize the text
+            romanized = self.uroman_instance.romanize_string(text, lcode=self.uroman_language)
+            return romanized
+        except Exception as e:
+            print(f"Warning: uroman failed to romanize text: {e}")
+            print(f"Returning original text")
+            return text
+    
     def extract_text_from_cell(self, cell: Dict) -> Optional[str]:
         """Extract text from a cell based on configured text_source.
         
@@ -322,7 +365,11 @@ class GitLabDatasetDownloader:
             # Strip HTML tags if present
             import re
             text = re.sub(r'<[^>]+>', '', value)
-            return text.strip() if text.strip() else None
+            text = text.strip() if text.strip() else None
+            # Apply uroman if enabled
+            if text:
+                text = self.romanize_text(text)
+            return text
             
         elif self.text_source == 'edit_history':
             # Extract from edit history
@@ -338,26 +385,30 @@ class GitLabDatasetDownloader:
                     if edit.get('type') == 'initial-import':
                         value = edit.get('value', '')
                         if value and not value.strip().startswith('<'):
-                            return value.strip()
+                            text = value.strip()
+                            return self.romanize_text(text)
                 # Fallback to first plain text edit
                 for edit in edits:
                     value = edit.get('value', '')
                     if value and not value.strip().startswith('<'):
-                        return value.strip()
+                        text = value.strip()
+                        return self.romanize_text(text)
                         
             elif self.edit_history_selection == 'first':
                 # Use first edit with plain text
                 for edit in edits:
                     value = edit.get('value', '')
                     if value and not value.strip().startswith('<'):
-                        return value.strip()
+                        text = value.strip()
+                        return self.romanize_text(text)
                         
             elif self.edit_history_selection == 'last':
                 # Use last edit with plain text
                 for edit in reversed(edits):
                     value = edit.get('value', '')
                     if value and not value.strip().startswith('<'):
-                        return value.strip()
+                        text = value.strip()
+                        return self.romanize_text(text)
             
             return None
             
@@ -399,8 +450,11 @@ class GitLabDatasetDownloader:
                     transcription_data = audio_info.get('transcription', {})
                     text = transcription_data.get('content', '')
                     language = transcription_data.get('language')
+                    # Apply uroman if enabled
+                    if text:
+                        text = self.romanize_text(text)
                 else:
-                    # Use value or edit_history
+                    # Use value or edit_history (already romanized in extract_text_from_cell)
                     text = self.extract_text_from_cell(cell)
                     language = None
                 
