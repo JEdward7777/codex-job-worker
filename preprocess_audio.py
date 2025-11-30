@@ -382,7 +382,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        help="Path to YAML configuration file (e.g., xiang_tts.yaml)"
+        help="Path to YAML configuration file (e.g., xiang.yaml)"
     )
     parser.add_argument(
         "--input_dir",
@@ -480,18 +480,19 @@ def main():
     
     # Get parameters from config or args
     if config:
-        audio_config = config.get('audio', {})
+        tts_config = config.get('tts', {})
+        audio_config = tts_config.get('audio', {})
         sample_rate = audio_config.get('sample_rate', 16000)
         channels = audio_config.get('channels', 1)
         bit_depth = audio_config.get('bit_depth', 16)
         normalize = audio_config.get('normalize', True)
         trim_silence = audio_config.get('trim_silence', True)
         silence_threshold = audio_config.get('silence_threshold', 20.0)
-        
+
         # Get paths from config
-        paths = config.get('paths', {})
-        input_dir = Path(args.input_dir or paths.get('raw_audio', ''))
-        input_metadata = Path(args.input_metadata or paths.get('raw_metadata', '')) if (args.input_metadata or paths.get('raw_metadata')) else None
+        dataset_config = config.get('dataset', {})
+        input_dir = Path(args.input_dir or str(Path(dataset_config.get('output_dir', '')) / dataset_config.get('audio_dir', 'audio')))
+        input_metadata = Path(args.input_metadata or str(Path(dataset_config.get('output_dir', '')) / dataset_config.get('csv_filename', 'metadata.csv'))) if (args.input_metadata or (dataset_config.get('output_dir') and dataset_config.get('csv_filename'))) else None
         output_dir = Path(args.output_dir or paths.get('preprocessed', ''))
     else:
         # Use command line arguments

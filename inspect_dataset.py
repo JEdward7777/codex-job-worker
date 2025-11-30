@@ -5,10 +5,12 @@ Tests that audio and text data are properly loaded and accessible.
 """
 
 import sys
+import argparse
 from pathlib import Path
 from datasets import load_from_disk
 import numpy as np
 import soundfile as sf
+import yaml
 
 def inspect_dataset(dataset_path: str):
     """Load and inspect the HuggingFace dataset."""
@@ -153,11 +155,30 @@ def inspect_dataset(dataset_path: str):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1:
-        dataset_path = sys.argv[1]
-    else:
-        # Default path from xiang_tts.yaml
-        dataset_path = "/home/lansford/vast_ai_tts/dataset/Xiang/hf_dataset"
-    
+    parser = argparse.ArgumentParser(
+        description="Inspect and validate the prepared HuggingFace dataset"
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to YAML configuration file (e.g., xiang.yaml)"
+    )
+
+    args = parser.parse_args()
+
+    # Load config
+    with open(args.config, 'r') as f:
+        config = yaml.safe_load(f)
+
+    # Get dataset path from config
+    tts_config = config.get('tts', {})
+    paths = tts_config.get('paths', {})
+    dataset_path = paths.get('hf_dataset', '')
+
+    if not dataset_path:
+        print("Error: hf_dataset path not found in config file")
+        sys.exit(1)
+
     exit_code = inspect_dataset(dataset_path)
     sys.exit(exit_code)

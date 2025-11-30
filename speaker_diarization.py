@@ -361,7 +361,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        help="Path to YAML configuration file (e.g., xiang_tts.yaml)"
+        help="Path to YAML configuration file (e.g., xiang.yaml)"
     )
     parser.add_argument(
         "--audio_dir",
@@ -424,7 +424,8 @@ def main():
     
     # Get parameters from config or args
     if config:
-        diarization_config = config.get('speaker_diarization', {})
+        tts_config = config.get('tts', {})
+        diarization_config = tts_config.get('speaker_diarization', {})
         method = args.method or diarization_config.get('method', 'resemblyzer')
         clustering_method = args.clustering or diarization_config.get('clustering_method', 'hdbscan')
         min_cluster_size = diarization_config.get('min_cluster_size', 5)
@@ -434,9 +435,9 @@ def main():
         max_speakers = diarization_config.get('max_speakers')
         generate_samples = args.generate_samples or diarization_config.get('generate_samples', True)
         samples_per_cluster = diarization_config.get('samples_per_cluster', 3)
-        
+
         # Get paths from config
-        paths = config.get('paths', {})
+        paths = tts_config.get('paths', {})
         audio_dir = Path(args.audio_dir or paths.get('preprocessed_audio', ''))
         output_dir = Path(args.output_dir or paths.get('speaker_analysis', ''))
         metadata_path = Path(args.metadata or paths.get('preprocessed_metadata', '')) if (args.metadata or paths.get('preprocessed_metadata')) else None

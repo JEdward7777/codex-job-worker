@@ -401,7 +401,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        help="Path to YAML configuration file (e.g., xiang_tts.yaml)"
+        help="Path to YAML configuration file (e.g., xiang.yaml)"
     )
     parser.add_argument(
         "--audio_dir",
@@ -473,7 +473,8 @@ def main():
     
     # Get parameters from config or args
     if config:
-        dataset_config = config.get('dataset', {})
+        tts_config = config.get('tts', {})
+        dataset_config = tts_config.get('dataset', {})
         train_split = args.train_split if args.train_split != 0.9 else dataset_config.get('train_split', 0.9)
         val_split = args.val_split if args.val_split != 0.1 else dataset_config.get('val_split', 0.1)
         test_split = args.test_split if args.test_split != 0.0 else dataset_config.get('test_split', 0.0)
@@ -481,9 +482,9 @@ def main():
         seed = args.seed if args.seed != 42 else dataset_config.get('seed', 42)
         min_duration = dataset_config.get('min_duration')
         max_duration = dataset_config.get('max_duration')
-        
+
         # Get paths from config
-        paths = config.get('paths', {})
+        paths = tts_config.get('paths', {})
         audio_dir = Path(args.audio_dir or paths.get('preprocessed_audio', ''))
         metadata_path = Path(args.metadata or paths.get('preprocessed_metadata', ''))
         speaker_ids_path = Path(args.speaker_ids or paths.get('speaker_ids', ''))

@@ -30,16 +30,17 @@ class TTSTrainingConfigGenerator:
         Initialize the config generator.
         
         Args:
-            config_path: Path to our YAML config file (e.g., xiang_tts.yaml)
+            config_path: Path to our YAML config file (e.g., xiang.yaml)
         """
         logger.info(f"Loading configuration from {config_path}")
         with open(config_path, 'r') as f:
             self.config = yaml.safe_load(f)
         
-        self.language = self.config.get('language', {})
-        self.paths = self.config.get('paths', {})
-        self.training_config = self.config.get('training', {})
-        self.dataset_config = self.config.get('dataset', {})
+        tts_config = self.config.get('tts', {})
+        self.language = tts_config.get('language', {})
+        self.paths = tts_config.get('paths', {})
+        self.training_config = tts_config.get('training', {})
+        self.dataset_config = tts_config.get('dataset', {})
     
     def generate_training_config(
         self,
@@ -286,7 +287,7 @@ def main():
         "--config",
         type=str,
         required=True,
-        help="Path to YAML configuration file (e.g., xiang_tts.yaml)"
+        help="Path to YAML configuration file (e.g., xiang.yaml)"
     )
     parser.add_argument(
         "--dataset_path",
