@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Extract audio-text pairs from CODEX files using edit history.
-This looks for the initial-import or earliest edit that contains the Lingao text.
+This looks for the initial-import or earliest edit that contains the config text.
 """
 
 import os
@@ -15,7 +15,7 @@ from gitlab_to_hf_dataset import GitLabDatasetDownloader
 
 
 def extract_text_from_edit_history(cell: Dict) -> Optional[str]:
-    """Extract Lingao text from edit history.
+    """Extract config text from edit history.
     
     Looks for the initial-import edit or the earliest edit with plain text.
     """

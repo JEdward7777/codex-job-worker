@@ -82,7 +82,7 @@ def main():
         "--config",
         type=str,
         required=True,
-        help="Path to YAML configuration file (e.g., xiang.yaml)"
+        help="Path to YAML configuration file (e.g., config.yaml)"
     )
     parser.add_argument(
         "--val_loss_metric",

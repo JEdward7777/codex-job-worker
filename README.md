@@ -178,7 +178,7 @@ Edit `config.yaml` to customize:
 gitlab:
   server_url: "https://git.genesisrnd.com"
   access_token: "your-token-here"
-  project_id: "eten/lingao/lingao-fxrmlox2kyrrr3fwupgsq"
+  project_id: "eten/config/config-fxrmlox2kyrrr3fwupgsq"
 
 dataset:
   output_dir: "huggingface_dataset"

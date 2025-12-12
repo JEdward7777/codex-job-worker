@@ -351,7 +351,7 @@ class GitLabDatasetDownloader:
             print(f"Returning original text")
             return text
     
-    def filter_text(self, text: str) -> Optional[str]:
+    def filter_text(self, text: str, suppress_uroman: bool = False) -> Optional[str]:
         """Apply all text filtering operations.
         
         This method consolidates all text filtering operations including:
@@ -359,10 +359,11 @@ class GitLabDatasetDownloader:
         - Replacing &nbsp; with spaces
         - Stripping whitespace
         - Replacing duplicate spaces with single spaces
-        - Romanizing text (if enabled)
+        - Romanizing text (if enabled and not suppressed)
         
         Args:
             text: The text to filter
+            suppress_uroman: If True, skip uroman romanization even if enabled in config
             
         Returns:
             Filtered text or None if the text is empty after filtering
@@ -388,16 +389,18 @@ class GitLabDatasetDownloader:
         if not text:
             return None
         
-        # Apply romanization if enabled
-        text = self.romanize_text(text)
+        # Apply romanization if enabled and not suppressed
+        if not suppress_uroman:
+            text = self.romanize_text(text)
         
         return text
     
-    def extract_text_from_cell(self, cell: Dict) -> Optional[str]:
+    def extract_text_from_cell(self, cell: Dict, suppress_uroman: bool = False) -> Optional[str]:
         """Extract text from a cell based on configured text_source.
         
         Args:
             cell: The cell data from CODEX file
+            suppress_uroman: If True, skip uroman romanization (keeps text in original script)
             
         Returns:
             Extracted text or None if not found
@@ -405,7 +408,7 @@ class GitLabDatasetDownloader:
         if self.text_source == 'value':
             # Use current value field
             value = cell.get('value', '')
-            return self.filter_text(value)
+            return self.filter_text(value, suppress_uroman=suppress_uroman)
             
         elif self.text_source == 'edit_history':
             # Extract from edit history
@@ -421,14 +424,14 @@ class GitLabDatasetDownloader:
                     if edit.get('type') == 'initial-import':
                         value = edit.get('value', '')
                         if value and not value.strip().startswith('<'):
-                            filtered = self.filter_text(value)
+                            filtered = self.filter_text(value, suppress_uroman=suppress_uroman)
                             if filtered:
                                 return filtered
                 # Fallback to first plain text edit
                 for edit in edits:
                     value = edit.get('value', '')
                     if value and not value.strip().startswith('<'):
-                        filtered = self.filter_text(value)
+                        filtered = self.filter_text(value, suppress_uroman=suppress_uroman)
                         if filtered:
                             return filtered
                         
@@ -437,7 +440,7 @@ class GitLabDatasetDownloader:
                 for edit in edits:
                     value = edit.get('value', '')
                     if value and not value.strip().startswith('<'):
-                        filtered = self.filter_text(value)
+                        filtered = self.filter_text(value, suppress_uroman=suppress_uroman)
                         if filtered:
                             return filtered
                         
@@ -446,7 +449,7 @@ class GitLabDatasetDownloader:
                 for edit in reversed(edits):
                     value = edit.get('value', '')
                     if value and not value.strip().startswith('<'):
-                        filtered = self.filter_text(value)
+                        filtered = self.filter_text(value, suppress_uroman=suppress_uroman)
                         if filtered:
                             return filtered
             
@@ -462,8 +465,8 @@ class GitLabDatasetDownloader:
                 audio_info = attachments[selected_audio_id]
                 transcription_data = audio_info.get('transcription', {})
                 text = transcription_data.get('content', '')
-                # Apply filtering (including romanization if enabled)
-                return self.filter_text(text)
+                # Apply filtering (including romanization if enabled and not suppressed)
+                return self.filter_text(text, suppress_uroman=suppress_uroman)
             
             return None
             

@@ -1,3 +1,6 @@
 [submodule "finetune-hf-vits"]
 	path = finetune-hf-vits
 	url = https://github.com/ylacombe/finetune-hf-vits.git
+[submodule "StableTTS"]
+	path = StableTTS
+	url = https://github.com/KdaiP/StableTTS

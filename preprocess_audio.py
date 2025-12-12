@@ -382,7 +382,7 @@ def main():
     parser.add_argument(
         "--config",
         type=str,
-        help="Path to YAML configuration file (e.g., xiang.yaml)"
+        help="Path to YAML configuration file (e.g., config.yaml)"
     )
     parser.add_argument(
         "--input_dir",

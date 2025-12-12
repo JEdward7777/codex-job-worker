@@ -30,7 +30,7 @@ class TTSTrainingConfigGenerator:
         Initialize the config generator.
         
         Args:
-            config_path: Path to our YAML config file (e.g., xiang.yaml)
+            config_path: Path to our YAML config file (e.g., config.yaml)
         """
         logger.info(f"Loading configuration from {config_path}")
         with open(config_path, 'r') as f:
@@ -128,6 +128,7 @@ class TTSTrainingConfigGenerator:
             "warmup_ratio": self.training_config.get('warmup_ratio', 0.01) if self.training_config.get('warmup_ratio') else None,
             "warmup_steps": self.training_config.get('warmup_steps', 500) if not self.training_config.get('warmup_ratio') else None,
             "group_by_length": False,
+            "resume_from_checkpoint": self.training_config.get('resume_from_checkpoint'),
             
             # Evaluation
             "do_eval": True,
@@ -287,7 +288,7 @@ def main():
         "--config",
         type=str,
         required=True,
-        help="Path to YAML configuration file (e.g., xiang.yaml)"
+        help="Path to YAML configuration file (e.g., config.yaml)"
     )
     parser.add_argument(
         "--dataset_path",

@@ -162,7 +162,7 @@ if __name__ == "__main__":
         "--config",
         type=str,
         required=True,
-        help="Path to YAML configuration file (e.g., xiang.yaml)"
+        help="Path to YAML configuration file (e.g., config.yaml)"
     )
 
     args = parser.parse_args()
