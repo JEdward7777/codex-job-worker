@@ -1,2 +1,85 @@
-__pycache__
-catboost_info
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# IDE
+.idea/
+*.swp
+*~
+
+# Secrets and credentials - NEVER COMMIT THESE
+.env
+.env.*
+!.env.example
+.env.secrets
+*.secrets
+config.yaml
+config.*.yaml
+!config.yaml.example
+
+# Work directories
+work/
+/tmp/
+
+# Logs
+*.log
+logs/
+
+# Model checkpoints (large files)
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.ckpt
+
+# Audio files (large files)
+*.wav
+*.mp3
+*.ogg
+*.webm
+*.m4a
+*.flac
+
+# HuggingFace dataset output
+huggingface_dataset/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Coverage
+.coverage
+htmlcov/
+
+# pytest
+.pytest_cache/
+
+# mypy
+.mypy_cache/
+
+# Other
+catboost_info/
+.DS_Store
+Thumbs.db

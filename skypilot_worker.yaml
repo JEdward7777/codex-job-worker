@@ -1,0 +1,108 @@
+# SkyPilot task file for codex-job-worker
+#
+# Usage:
+#   # Set secrets as environment variables first
+#   export GITLAB_TOKEN=your_gitlab_token
+#   export WORKER_ID=your_worker_id
+#
+#   # Launch with SkyPilot (secrets passed via --env)
+#   sky launch skypilot_worker.yaml --env GITLAB_TOKEN --env WORKER_ID
+#
+#   # Or use an env file (not committed to repo)
+#   sky launch skypilot_worker.yaml --env-file .env.secrets
+#
+# The .env.secrets file format:
+#   GITLAB_TOKEN=your_gitlab_token
+#   WORKER_ID=your_worker_id
+#
+# Supported clouds: aws, gcp, azure, lambda, runpod, kubernetes, vast
+# See: https://vast.ai/article/vast-ai-gpus-can-now-be-rentend-through-skypilot
+
+name: codex-job-worker
+
+resources:
+  # Supported clouds: aws, gcp, azure, lambda, runpod, kubernetes, vast
+  # Change this to your preferred cloud provider
+  cloud: vast  # Vast.ai - often has the best GPU pricing
+  accelerators: A10G:1  # Adjust based on your needs
+  # For training, you may want more powerful GPUs:
+  # accelerators: A100:1
+  # accelerators: V100:1
+
+  # Optional: specify region for lower latency to GitLab server
+  # region: us-east-1
+
+# Number of nodes (1 for single worker)
+num_nodes: 1
+
+# Setup runs once when the cluster is provisioned
+setup: |
+  set -e
+
+  # Install system dependencies
+  sudo apt-get update
+  sudo apt-get install -y git ffmpeg
+
+  # Clone and setup the worker
+  REPO_URL="https://github.com/JEdward7777/codex-job-worker.git"
+  INSTALL_DIR="$HOME/codex-job-worker"
+
+  if [ ! -d "$INSTALL_DIR" ]; then
+    git clone --recurse-submodules "$REPO_URL" "$INSTALL_DIR"
+  else
+    cd "$INSTALL_DIR"
+    git pull origin main || true
+    git submodule update --init --recursive
+  fi
+
+  # Install uv
+  if ! command -v uv &> /dev/null; then
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+  fi
+  export PATH="$HOME/.local/bin:$PATH"
+
+  # Install Python dependencies
+  cd "$INSTALL_DIR"
+  uv sync
+
+  # Apply patches
+  ./apply_submodule_patches.sh
+
+# Run executes the actual task
+run: |
+  set -e
+  export PATH="$HOME/.local/bin:$PATH"
+  cd $HOME/codex-job-worker
+
+  # Validate required environment variables
+  if [ -z "$GITLAB_TOKEN" ]; then
+    echo "ERROR: GITLAB_TOKEN environment variable is required"
+    echo "Launch with: sky launch skypilot_worker.yaml --env GITLAB_TOKEN=your_token --env WORKER_ID=your_id"
+    exit 1
+  fi
+
+  if [ -z "$WORKER_ID" ]; then
+    echo "ERROR: WORKER_ID environment variable is required"
+    exit 1
+  fi
+
+  # Run the worker with continuous polling
+  # --loop-interval 300 = check for new jobs every 5 minutes
+  uv run python worker_entry.py \
+    --token "$GITLAB_TOKEN" \
+    --worker-id "$WORKER_ID" \
+    --loop-interval 300 \
+    --keep-jobs 5 \
+    --verbose
+
+# Environment variables (can be overridden at launch time)
+envs:
+  # These are placeholders - actual values should be passed via --env flag
+  # GITLAB_TOKEN: ""  # Required - pass via --env GITLAB_TOKEN
+  # WORKER_ID: ""     # Required - pass via --env WORKER_ID
+
+  # Optional: GitLab server URL (defaults to https://git.genesisrnd.com)
+  # GITLAB_URL: "https://git.genesisrnd.com"
+
+  # Optional: Work directory for job files
+  WORK_DIR: "/tmp/gpu_work"

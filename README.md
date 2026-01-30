@@ -78,7 +78,63 @@ cd StableTTS && git reset --hard HEAD && cd ..
 
 For more information on working with git submodules and patches, see [gist.github.com](https://gist.github.com/marc-hanheide/77d2685ceb2aaa4b90324c520dd4c34c).
 
-### Running the Worker
+## Deployment with SkyPilot
+
+The recommended way to deploy the worker is using [SkyPilot](https://skypilot.readthedocs.io/), which provides a unified interface for launching GPU instances across multiple cloud providers.
+
+### Supported Cloud Providers
+
+- AWS, GCP, Azure
+- Lambda Labs
+- RunPod
+- Vast.ai ([announced August 2025](https://vast.ai/article/vast-ai-gpus-can-now-be-rentend-through-skypilot))
+- Kubernetes
+
+### Quick Start with SkyPilot
+
+```bash
+# Install SkyPilot
+pip install "skypilot[aws,gcp,azure,lambda,runpod,vast]"
+
+# Configure your cloud credentials (see SkyPilot docs)
+sky check
+
+# Set your secrets as environment variables
+export GITLAB_TOKEN=your_gitlab_token
+export WORKER_ID=gpu-worker-1
+
+# Launch the worker on Vast.ai (or change cloud in skypilot_worker.yaml)
+sky launch skypilot_worker.yaml --env GITLAB_TOKEN --env WORKER_ID
+```
+
+### Secret Management
+
+**Important**: Never commit secrets to the repository. Use one of these methods:
+
+1. **Environment variables** (recommended):
+   ```bash
+   export GITLAB_TOKEN=your_token
+   export WORKER_ID=your_worker_id
+   sky launch skypilot_worker.yaml --env GITLAB_TOKEN --env WORKER_ID
+   ```
+
+2. **Env file** (not committed to repo):
+   ```bash
+   # Create .env.secrets file (already in .gitignore)
+   echo "GITLAB_TOKEN=your_token" > .env.secrets
+   echo "WORKER_ID=your_worker_id" >> .env.secrets
+
+   sky launch skypilot_worker.yaml --env-file .env.secrets
+   ```
+
+3. **Cloud secret managers** (for production):
+   - AWS Secrets Manager
+   - GCP Secret Manager
+   - Azure Key Vault
+
+For more details on SkyPilot environment variables and secrets, see [docs.skypilot.co](https://docs.skypilot.co/en/stable/running-jobs/environment-variables.html).
+
+### Running the Worker (Manual)
 
 ```bash
 # Basic usage
