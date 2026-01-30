@@ -1,178 +1,271 @@
-# Audio Text Tests - GitLab to HuggingFace Dataset Converter
+# GPU Worker for TTS and ASR Jobs
 
-This project downloads audio files and transcriptions from a GitLab repository containing Bible recordings and prepares them in HuggingFace AudioFolder format.
+A GPU worker system that processes Text-to-Speech (TTS) and Automatic Speech Recognition (ASR) jobs from GitLab-hosted Bible translation projects. The worker claims jobs from a manifest file, executes training or inference tasks using dynamically loaded handlers, and uploads results back to GitLab.
 
-## Features
+## Overview
 
-- ✅ Authenticates with GitLab using personal access token
-- ✅ Explores repository structure and finds CODEX files (transcription data)
-- ✅ Maps audio files to transcriptions using audio IDs
-- ✅ Downloads Git LFS files using HTTP Basic authentication
-- ✅ Downloads only verses with completed transcriptions
-- ✅ Creates HuggingFace-compatible dataset with CSV metadata
-- ✅ Supports limiting records for testing
-- ✅ Properly handles CSV quoting for transcriptions
-- ✅ **Fully working end-to-end pipeline**
+This project provides a complete pipeline for:
 
-## Setup
+- **TTS Training**: Train StableTTS models on audio-text pairs from Bible translation projects
+- **TTS Inference**: Generate speech audio for verses that have text but no recordings
+- **ASR Training**: Train Wav2Vec2-BERT models for speech recognition
+- **ASR Inference**: Transcribe audio recordings to text
 
-1. Install dependencies using uv:
+The system is designed to run on GPU workers launched via [SkyPilot](https://skypilot.readthedocs.io/), with jobs coordinated through a GitLab-based manifest system.
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                              worker_entry.py                                 │
+│  ┌──────────────┐    ┌──────────────┐    ┌─────────────────────────────────┐ │
+│  │ Claim Job    │──▶│ Load Handler │──▶│ Execute Handler (with callbacks)│ │
+│  │ (gitlab_jobs)│    │ (dynamic)    │    │                                 │ │
+│  └──────────────┘    └──────────────┘    └─────────────────────────────────┘ │
+│         │                                           │                        │
+│         ▼                                           ▼                        │
+│  ┌──────────────┐                          ┌─────────────────────────────┐   │
+│  │ Update       │◀────────────────────────│ Upload Results              │   │
+│  │ response.yaml│                          │ (models, audio, .codex)     │   │
+│  └──────────────┘                          └─────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Quick Start
+
+### Prerequisites
+
+- Python 3.10+
+- CUDA-capable GPU (for training/inference)
+- GitLab access token with `read_api`, `read_repository`, and `write_repository` scopes
+
+### Installation
+
 ```bash
+# Clone the repository with submodules
+git clone --recurse-submodules <repository-url>
+cd audio_text_tests
+
+# Or if already cloned, initialize submodules
+git submodule update --init --recursive
+
+# Install dependencies using uv
 uv sync
+
+# Apply patches to submodules (required!)
+./apply_submodule_patches.sh
 ```
 
-2. Configure your GitLab credentials in `config.yaml`:
-   - Add your GitLab access token (see instructions below)
-   - Verify the project_id is correct
-   - Adjust `max_records` for testing (set to `0` or `null` for all records)
+### Submodule Patches
 
-## How to Create a GitLab Access Token
+This project uses git submodules for StableTTS and finetune-hf-vits. Local patches are required to fix compatibility issues with newer library versions. The [`apply_submodule_patches.sh`](apply_submodule_patches.sh) script applies these patches automatically.
 
-1. Go to your GitLab instance: https://git.genesisrnd.com
-2. Click on your profile picture (top right) → **Edit Profile**
-3. In the left sidebar, click **Access Tokens**
-4. Click **Add new token**
-5. Fill in the details:
-   - **Token name**: Something descriptive like "HuggingFace Dataset Converter"
-   - **Expiration date**: Set as needed
-   - **Select scopes**: Check `read_api` and `read_repository`
-6. Click **Create personal access token**
-7. **Important**: Copy the token immediately (you won't be able to see it again)
-8. Paste the token into `config.yaml` under `gitlab.access_token`
+**Patches applied:**
+- **finetune-hf-vits**: Removes deprecated `send_example_telemetry` import (removed in newer transformers versions)
+- **finetune-hf-vits**: Fixes matplotlib `canvas.tostring_rgb()` → `canvas.buffer_rgba()` API change
+- **StableTTS**: Fixes relative path resolution for mel spectrograms in dataset loading
 
-## Usage
-
-The script uses Google Fire for a clean CLI interface. All commands support the `--config_path` parameter to specify a custom configuration file (defaults to `config.yaml`).
-
-### Getting Help
+If you need to reset and reapply patches:
 
 ```bash
-# Show all available commands
-uv run python gitlab_to_hf_dataset.py
+# Reset submodules to clean state
+cd finetune-hf-vits && git reset --hard HEAD && cd ..
+cd StableTTS && git reset --hard HEAD && cd ..
 
-# Or use --help
-uv run python gitlab_to_hf_dataset.py --help
-
-# Get help for a specific command
-uv run python gitlab_to_hf_dataset.py process --help
-uv run python gitlab_to_hf_dataset.py examine --help
-uv run python gitlab_to_hf_dataset.py debug --help
-uv run python gitlab_to_hf_dataset.py explore --help
+# Reapply patches
+./apply_submodule_patches.sh
 ```
 
-### Basic Command Structure
+For more information on working with git submodules and patches, see [gist.github.com](https://gist.github.com/marc-hanheide/77d2685ceb2aaa4b90324c520dd4c34c).
+
+### Running the Worker
 
 ```bash
-# Using default config.yaml
-uv run python gitlab_to_hf_dataset.py <command>
+# Basic usage
+python worker_entry.py --token YOUR_GITLAB_TOKEN --worker-id gpu-worker-1
 
-# Using custom config file
-uv run python gitlab_to_hf_dataset.py <command> --config_path=my_config.yaml
+# With continuous polling (every 5 minutes)
+python worker_entry.py --token YOUR_TOKEN --worker-id gpu-worker-1 --loop-interval 300
+
+# Using environment variables
+export GITLAB_TOKEN=your_token
+export WORKER_ID=gpu-worker-1
+python worker_entry.py
 ```
 
-### Available Commands
+### Command-Line Options
 
-#### 1. Explore Repository Structure
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--token` | `$GITLAB_TOKEN` | GitLab access token |
+| `--worker-id` | `$WORKER_ID` | Unique worker identifier |
+| `--gitlab-url` | `https://git.genesisrnd.com` | GitLab server URL |
+| `--work-dir` | `./work` | Base directory for job work files |
+| `--loop-interval` | `-1` | Seconds between job checks (-1 = exit when done) |
+| `--keep-jobs` | `5` | Number of completed job directories to keep |
+| `--verbose` | `false` | Enable verbose output |
+
+## Job Manifest System
+
+Jobs are defined in a YAML manifest file at `gpu_jobs/manifest.yaml` in each GitLab project. The manifest is created by a **Codex Editor plugin** that provides a UI for creating and managing GPU jobs.
+
+> **Note**: The Codex Editor plugin that creates these manifest files is available separately. Download Codex Editor from [codexeditor.app](https://codexeditor.app/).
+
+### Manifest Format
+
+```yaml
+version: 1
+jobs:
+  - job_id: "abc123"
+    job_type: tts              # 'tts' or 'asr'
+    mode: training             # 'training', 'inference', or 'training_and_inference'
+    model:
+      type: StableTTS          # 'StableTTS' or 'W2V2BERT'
+      base_checkpoint: gpu_jobs/job_xyz/models/best_model.pt  # Optional
+    epochs: 1000               # For training modes
+    inference:
+      include_verses:          # Optional list of verse IDs/references
+        - "MAT 1:1"
+      exclude_verses: []       # Optional list to exclude
+    voice_reference: "files/audio/speaker_sample.webm"  # For TTS inference
+    audio_format: webm         # Output format: wav, ogg, mp3, webm
+    timeout: "2027-01-01T00:00:00Z"
+    canceled: false
+```
+
+### Job States
+
+| State | Condition |
+|-------|-----------|
+| pending | No job folder exists |
+| running | Job folder exists with worker ID |
+| completed | `response.yaml` says completed |
+| failed | `response.yaml` says failed |
+| canceled | Manifest canceled + response says canceled |
+
+## Dynamic Handler System
+
+Handlers are loaded dynamically based on `job_type`, `model.type`, and `mode`:
+
+```
+handlers/
+├── __init__.py
+├── base.py                  # Shared utilities
+├── tts/
+│   ├── __init__.py
+│   └── stabletts/
+│       ├── __init__.py
+│       ├── training.py
+│       ├── inference.py
+│       └── training_and_inference.py
+└── asr/
+    ├── __init__.py
+    └── w2v2bert/
+        ├── __init__.py
+        ├── training.py
+        ├── inference.py
+        └── training_and_inference.py
+```
+
+### Handler Interface
+
+Each handler module must implement a `run()` function:
+
+```python
+def run(job_context: dict, callbacks: JobCallbacks) -> dict:
+    """
+    Execute the job.
+
+    Args:
+        job_context: Job definition from manifest
+        callbacks: Callbacks object for heartbeat, file operations, etc.
+
+    Returns:
+        dict with 'success': bool and optional 'error_message': str
+    """
+```
+
+### Adding New Handlers
+
+To add support for a new model type:
+
+1. Create a new directory under `handlers/{job_type}/{model_name}/`
+2. Implement `training.py`, `inference.py`, and/or `training_and_inference.py`
+3. Each module must have a `run(job_context, callbacks)` function
+
+The worker will automatically discover and load handlers based on the job configuration.
+
+## Callbacks API
+
+The `JobCallbacks` object provides handlers with:
+
+- **`heartbeat(epochs_completed, message)`**: Update progress and check for cancellation
+- **`get_work_dir()`**: Get the job-specific work directory
+- **`get_job_config(key, default)`**: Get configuration values
+- **`mark_complete(result_data)`**: Mark job as completed
+- **`mark_failed(error_message)`**: Mark job as failed
+- **`scanner`**: Access to GitLab API for file operations
+
+## Project Structure
+
+```
+audio_text_tests/
+├── worker_entry.py              # Main entry point for GPU worker
+├── gitlab_jobs.py               # Job claiming and status updates
+├── gitlab_to_hf_dataset.py      # Download/upload audio/text from GitLab
+├── handlers/                    # Dynamic job handlers
+│   ├── base.py                  # Shared utilities
+│   ├── tts/stabletts/           # StableTTS handlers
+│   └── asr/w2v2bert/            # Wav2Vec2-BERT handlers
+├── train_stabletts.py           # StableTTS training script
+├── inference_stabletts.py       # StableTTS inference script
+├── train_w2v2bert_asr.py        # ASR training script
+├── inference_w2v2bert_asr.py    # ASR inference script
+├── preprocess_stabletts.py      # Data preprocessing for TTS
+├── preprocess_audio.py          # Audio preprocessing (silence trimming)
+├── StableTTS/                   # StableTTS model (submodule)
+└── finetune-hf-vits/            # VITS fine-tuning (submodule)
+```
+
+## Standalone Tools
+
+In addition to the worker system, this project includes standalone tools that can be used independently:
+
+### GitLab to HuggingFace Dataset Converter
+
+Download audio files and transcriptions from GitLab and prepare them in HuggingFace AudioFolder format:
+
 ```bash
-uv run python gitlab_to_hf_dataset.py explore
+# Explore repository structure
+uv run python gitlab_to_hf_dataset.py explore --config_path=config.yaml
+
+# Process and download dataset
+uv run python gitlab_to_hf_dataset.py process --config_path=config.yaml
 ```
 
-Shows:
-- Total files in the repository
-- Number of CODEX files (transcription files)
-- Number of audio files
-- Sample file paths
+### Gradio Demos
 
-#### 2. Examine CODEX File Schema
-```bash
-# Examine first CODEX file found
-uv run python gitlab_to_hf_dataset.py examine
-
-# Examine specific file
-uv run python gitlab_to_hf_dataset.py examine --json_path="files/target/GEN.codex"
-```
-
-Downloads and displays the structure of a CODEX file to understand the data format.
-
-#### 3. Debug Mode (Detailed Analysis)
-```bash
-uv run python gitlab_to_hf_dataset.py debug
-```
-
-Provides detailed information about:
-- Audio ID mapping
-- Transcription availability
-- File matching status
-
-#### 4. Process and Download Dataset
-```bash
-uv run python gitlab_to_hf_dataset.py process
-```
-
-This will:
-1. Scan all 66 CODEX files (Bible books)
-2. Build audio file map (1,361 audio files)
-3. Extract audio-transcription pairs (only verses with completed transcriptions)
-4. Download audio files via Git LFS (using HTTP Basic authentication)
-5. Create `metadata.csv` in HuggingFace format
-
-**Note**: The script respects the `max_records` setting in `config.yaml`. Set it to a small number (e.g., 10) for testing, then set to `0` or `null` for full processing.
-
-### Using Custom Config Files
-
-You can specify a different configuration file for any command:
+Interactive demos for testing models:
 
 ```bash
-# Process with production config
-uv run python gitlab_to_hf_dataset.py process --config_path=config.prod.yaml
+# StableTTS demo
+uv run python gradio_demo_stabletts.py
 
-# Explore with test config
-uv run python gitlab_to_hf_dataset.py explore --config_path=config.test.yaml
-
-# Debug with custom config
-uv run python gitlab_to_hf_dataset.py debug --config_path=my_config.yaml
+# ASR demo
+uv run python gradio_demo_w2v2bert_asr.py
 ```
 
-This is useful for:
-- Testing with different GitLab repositories
-- Using different output directories
-- Switching between development and production settings
-- Managing multiple projects
+### Batch TTS Inference
 
-**Example output:**
+Generate audio for multiple texts:
+
+```bash
+uv run python batch_tts_inference.py --input texts.csv --output audio/ --checkpoint model.pt
 ```
-Total audio-transcription pairs found: 1
-Downloading audio files and creating CSV...
-[1/1] Downloading audio-1759292562790-fh3hv8f4g.webm...
-Dataset created successfully!
-```
-
-## Output Format
-
-The script creates a HuggingFace AudioFolder dataset:
-
-```
-huggingface_dataset/
-├── audio/
-│   ├── audio-1759292562790-fh3hv8f4g.webm
-│   ├── audio-1759293405884-32rj85az8.webm
-│   └── ...
-└── metadata.csv
-```
-
-**metadata.csv** format:
-```csv
-"file_name","transcription"
-"audio-1759292562790-fh3hv8f4g.webm","de khai doo da hui muc diam m sia doi ce can"
-```
-
-- All fields are properly quoted
-- Quotes within transcriptions are escaped (double-quoted)
-- Compatible with HuggingFace `datasets` library
 
 ## Configuration
 
-Edit `config.yaml` to customize:
+### config.yaml (for standalone tools)
 
 ```yaml
 gitlab:
@@ -187,27 +280,33 @@ dataset:
   max_records: 10  # Set to 0 or null for all records
 ```
 
-## Loading the Dataset in HuggingFace
+> **Note**: All `.yaml` files are ignored by git. Copy `config.yaml.example` to `config.yaml` and fill in your credentials.
 
-Once created, you can load the dataset using:
+## Related Documentation
 
-```python
-from datasets import load_dataset
+- [WORKER_IMPLEMENTATION_PLAN.md](WORKER_IMPLEMENTATION_PLAN.md) - Detailed architecture and implementation plan
+- [TRAINING_INSTRUCTIONS.md](TRAINING_INSTRUCTIONS.md) - Manual training instructions
+- [TTS_FINETUNING_README.md](TTS_FINETUNING_README.md) - TTS fine-tuning guide
+- [W2V2BERT_ASR_README.md](W2V2BERT_ASR_README.md) - ASR training guide
+- [GITLAB_JOBS_README.md](GITLAB_JOBS_README.md) - GitLab job scanner documentation
 
-dataset = load_dataset("audiofolder", data_dir="huggingface_dataset")
-```
+## How to Create a GitLab Access Token
 
-## Project Structure
+1. Go to your GitLab instance (e.g., https://git.genesisrnd.com)
+2. Click on your profile picture (top right) → **Edit Profile**
+3. In the left sidebar, click **Access Tokens**
+4. Click **Add new token**
+5. Fill in the details:
+   - **Token name**: Something descriptive like "GPU Worker"
+   - **Expiration date**: Set as needed
+   - **Select scopes**: Check `read_api`, `read_repository`, and `write_repository`
+6. Click **Create personal access token**
+7. **Important**: Copy the token immediately (you won't be able to see it again)
 
-- `gitlab_to_hf_dataset.py` - Main script with Google Fire CLI
-- `config.yaml` - Default configuration (not committed to git - all `.yaml` files are ignored)
-- `pyproject.toml` - UV project configuration
-- `.gitignore` - Excludes all YAML config files and output files
-- `README.md` - This file
+## License
 
-## Notes
-
-- The script only downloads verses that have both audio files and transcriptions
-- Audio files are stored in Git LFS (Large File Storage)
-- CODEX files contain metadata about Bible verses, audio attachments, and transcriptions
-- The script handles multiple audio versions per verse and selects the current one
+This project uses components from:
+- [StableTTS](https://github.com/KdaiP/StableTTS) - Apache 2.0 License
+- [Parler-TTS](https://github.com/huggingface/parler-tts) - Apache 2.0 License ([github.com](https://github.com/huggingface/parler-tts))
+- [Coqui TTS](https://github.com/coqui-ai/TTS) - MPL 2.0 License ([github.com](https://github.com/coqui-ai/TTS/tree/main))
+- [Inworld TTS](https://github.com/inworld-ai/tts) - MIT License ([github.com](https://github.com/inworld-ai/tts))
