@@ -406,7 +406,7 @@ audio_text_tests/
 ├── speaker_diarization.py        # Speaker clustering
 ├── prepare_tts_dataset.py        # Dataset preparation
 ├── train_mms_tts.py             # Training wrapper
-├── config.yaml               # Example config (Xiang language)
+├── config.yaml                  # Example config
 ├── finetune-hf-vits/            # Official training code (submodule)
 ├── TTS_FINETUNING_REQUIREMENTS.md  # Project requirements doc
 ├── TTS_WORKFLOW_PLANNING.md     # Workflow planning doc

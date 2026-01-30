@@ -5,14 +5,13 @@ Generates training config and calls the official finetune-hf-vits training scrip
 This wrapper bridges our dataset preparation pipeline with the official training code.
 """
 
-import os
 import json
-import yaml
-import argparse
-import subprocess
-from pathlib import Path
-from typing import Dict, Any
 import logging
+from typing import Dict, Any
+from pathlib import Path
+import subprocess
+import argparse
+import yaml
 
 # Configure logging
 logging.basicConfig(
@@ -24,24 +23,24 @@ logger = logging.getLogger(__name__)
 
 class TTSTrainingConfigGenerator:
     """Generates training config for finetune-hf-vits from our config format."""
-    
+
     def __init__(self, config_path: Path):
         """
         Initialize the config generator.
-        
+
         Args:
             config_path: Path to our YAML config file (e.g., config.yaml)
         """
-        logger.info(f"Loading configuration from {config_path}")
-        with open(config_path, 'r') as f:
+        logger.info("Loading configuration from %s", config_path)
+        with open(config_path, 'r', encoding="utf-8") as f:
             self.config = yaml.safe_load(f)
-        
+
         tts_config = self.config.get('tts', {})
         self.language = tts_config.get('language', {})
         self.paths = tts_config.get('paths', {})
         self.training_config = tts_config.get('training', {})
         self.dataset_config = tts_config.get('dataset', {})
-    
+
     def generate_training_config(
         self,
         output_path: Path,
@@ -52,14 +51,14 @@ class TTSTrainingConfigGenerator:
     ) -> Dict[str, Any]:
         """
         Generate training config in finetune-hf-vits format.
-        
+
         Args:
             output_path: Path to save the generated config
             dataset_path: Path to the HuggingFace dataset
             project_name: Name for the training project
             push_to_hub: Whether to push model to HuggingFace Hub
             hub_model_id: Hub model ID if pushing
-            
+
         Returns:
             Generated config dictionary
         """
@@ -67,25 +66,25 @@ class TTSTrainingConfigGenerator:
         language_name = self.language.get('name', 'unknown')
         language_code = self.language.get('code', 'unk')
         base_model = self.language.get('base_model', 'facebook/mms-tts-cmn')
-        
+
         # Get training parameters
         num_epochs = self.training_config.get('num_epochs', 250)
         learning_rate = self.training_config.get('learning_rate', 1e-4)
         per_device_train_batch_size = self.training_config.get('per_device_train_batch_size', 8)
         per_device_eval_batch_size = self.training_config.get('per_device_eval_batch_size', 8)
         gradient_accumulation_steps = self.training_config.get('gradient_accumulation_steps', 4)
-        
+
         # Get output directory
         output_dir = self.paths.get('checkpoints', './checkpoints')
-        
+
         # Get dataset parameters
         min_duration = self.dataset_config.get('min_duration', 0.5)
         max_duration = self.dataset_config.get('max_duration', 30.0)
-        
+
         # Generate project name if not provided
         if not project_name:
             project_name = f"mms_{language_code}_finetuning"
-        
+
         # Build the config
         training_config = {
             # Project info
@@ -95,7 +94,7 @@ class TTSTrainingConfigGenerator:
             "report_to": ["tensorboard"],  # Can add "wandb" if configured
             "overwrite_output_dir": False,  # Allow automatic checkpoint resumption
             "output_dir": output_dir,
-            
+
             # Dataset info - using local dataset (CSV format uses "transcription" column)
             "dataset_name": str(dataset_path),
             "audio_column_name": "audio",
@@ -104,18 +103,18 @@ class TTSTrainingConfigGenerator:
             "eval_split_name": "validation",
             "speaker_id_column_name": "speaker_id",
             "override_speaker_embeddings": True,  # Important for multi-speaker
-            
+
             # Duration filters
             "max_duration_in_seconds": max_duration,
             "min_duration_in_seconds": min_duration,
             "max_tokens_length": 500,
-            
+
             # Model
             "model_name_or_path": base_model,
-            
+
             # Preprocessing
             "preprocessing_num_workers": 4,
-            
+
             # Training
             "do_train": True,
             "num_train_epochs": num_epochs,
@@ -129,14 +128,14 @@ class TTSTrainingConfigGenerator:
             "warmup_steps": self.training_config.get('warmup_steps', 500) if not self.training_config.get('warmup_ratio') else None,
             "group_by_length": False,
             "resume_from_checkpoint": self.training_config.get('resume_from_checkpoint'),
-            
+
             # Evaluation
             "do_eval": True,
             "eval_steps": self.training_config.get('eval_steps', 100),
             "per_device_eval_batch_size": per_device_eval_batch_size,
             "max_eval_samples": 25,
             "do_step_schedule_per_epoch": True,
-            
+
             # Loss weights (VITS-specific)
             "weight_disc": 3,
             "weight_fmaps": 1,
@@ -144,41 +143,41 @@ class TTSTrainingConfigGenerator:
             "weight_kl": 1.5,
             "weight_duration": 1,
             "weight_mel": 35,
-            
+
             # Mixed precision
             "fp16": self.training_config.get('mixed_precision', 'fp16') == 'fp16',
             "seed": self.dataset_config.get('seed', 42)
         }
-        
+
         # Remove None values
         training_config = {k: v for k, v in training_config.items() if v is not None}
-        
+
         # Save config
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, 'w') as f:
+        with open(output_path, 'w', encoding="utf-8") as f:
             json.dump(training_config, f, indent=4)
-        
-        logger.info(f"Generated training config saved to: {output_path}")
-        logger.info(f"  Project: {project_name}")
-        logger.info(f"  Base model: {base_model}")
-        logger.info(f"  Dataset: {dataset_path}")
-        logger.info(f"  Epochs: {num_epochs}")
-        logger.info(f"  Learning rate: {learning_rate}")
-        logger.info(f"  Batch size: {per_device_train_batch_size}")
-        logger.info(f"  Output: {output_dir}")
-        
+
+        logger.info("Generated training config saved to: %s", output_path)
+        logger.info("  Project: %s", project_name)
+        logger.info("  Base model: %s", base_model)
+        logger.info("  Dataset: %s", dataset_path)
+        logger.info("  Epochs: %s", num_epochs)
+        logger.info("  Learning rate: %s", learning_rate)
+        logger.info("  Batch size: %s", per_device_train_batch_size)
+        logger.info("  Output: %s", output_dir)
+
         return training_config
 
 
 def setup_finetune_vits():
     """Setup the finetune-hf-vits repository."""
     finetune_dir = Path("finetune-hf-vits")
-    
+
     if not finetune_dir.exists():
-        logger.error(f"finetune-hf-vits directory not found at {finetune_dir}")
+        logger.error("finetune-hf-vits directory not found at %s", finetune_dir)
         logger.error("Please run: git submodule update --init --recursive")
         return False
-    
+
     # Check if monotonic_align is built
     monotonic_align_dir = finetune_dir / "monotonic_align" / "monotonic_align"
     if not monotonic_align_dir.exists():
@@ -191,40 +190,40 @@ def setup_finetune_vits():
             )
             logger.info("Monotonic alignment built successfully")
         except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to build monotonic alignment: {e}")
+            logger.error("Failed to build monotonic alignment: %s", e)
             return False
-    
+
     return True
 
 
 def convert_discriminator_checkpoint(language_code: str, output_dir: Path, finetune_dir: Path) -> bool:
     """
     Convert MMS checkpoint to include discriminator for training.
-    
+
     Args:
         language_code: ISO 639-3 language code (e.g., 'hak')
         output_dir: Directory to save the converted checkpoint
         finetune_dir: Path to finetune-hf-vits directory
-        
+
     Returns:
         True if successful, False otherwise
     """
     # Check if already converted
     if output_dir.exists() and (output_dir / "config.json").exists():
-        logger.info(f"Converted checkpoint already exists at {output_dir}")
+        logger.info("Converted checkpoint already exists at %s", output_dir)
         return True
-    
-    logger.info(f"Converting discriminator checkpoint for language: {language_code}")
-    logger.info(f"Output directory: {output_dir}")
-    
+
+    logger.info("Converting discriminator checkpoint for language: %s", language_code)
+    logger.info("Output directory: %s", output_dir)
+
     convert_script = finetune_dir / "convert_original_discriminator_checkpoint.py"
     if not convert_script.exists():
-        logger.error(f"Conversion script not found: {convert_script}")
+        logger.error("Conversion script not found: %s", convert_script)
         return False
-    
+
     # Create output directory
     output_dir.mkdir(parents=True, exist_ok=True)
-    
+
     # Run conversion script
     cmd = [
         "python",
@@ -232,51 +231,51 @@ def convert_discriminator_checkpoint(language_code: str, output_dir: Path, finet
         "--language_code", language_code,
         "--pytorch_dump_folder_path", str(output_dir)
     ]
-    
-    logger.info(f"Running: {' '.join(cmd)}")
-    
+
+    logger.info("Running: %s", ' '.join(cmd))
+
     try:
         subprocess.run(cmd, check=True)
         logger.info("Discriminator checkpoint converted successfully")
         return True
     except subprocess.CalledProcessError as e:
-        logger.error(f"Failed to convert checkpoint: {e}")
+        logger.error("Failed to convert checkpoint: %s", e)
         return False
 
 
 def run_training(config_path: Path, finetune_dir: Path):
     """
     Run the official finetune-hf-vits training script.
-    
+
     Args:
         config_path: Path to the generated training config JSON
         finetune_dir: Path to finetune-hf-vits directory
     """
     training_script = finetune_dir / "run_vits_finetuning.py"
-    
+
     if not training_script.exists():
-        logger.error(f"Training script not found: {training_script}")
+        logger.error("Training script not found: %s", training_script)
         return False
-    
+
     logger.info("="*60)
     logger.info("Starting MMS-TTS Fine-tuning")
     logger.info("="*60)
-    logger.info(f"Using config: {config_path}")
-    logger.info(f"Training script: {training_script}")
+    logger.info("Using config: %s", config_path)
+    logger.info("Training script: %s", training_script)
     logger.info("")
-    
+
     # Run training with accelerate
     cmd = ["accelerate", "launch", str(training_script), str(config_path)]
-    
-    logger.info(f"Running command: {' '.join(cmd)}")
+
+    logger.info("Running command: %s", ' '.join(cmd))
     logger.info("")
-    
+
     try:
         subprocess.run(cmd, check=True)
         logger.info("\nTraining completed successfully!")
         return True
     except subprocess.CalledProcessError as e:
-        logger.error(f"\nTraining failed with error: {e}")
+        logger.error("\nTraining failed with error: %s", e)
         return False
 
 
@@ -326,33 +325,33 @@ def main():
         action="store_true",
         help="Enable verbose logging"
     )
-    
+
     args = parser.parse_args()
-    
+
     # Set logging level
     if args.verbose:
         logger.setLevel(logging.DEBUG)
-    
+
     # Load our config
     config_path = Path(args.config)
     if not config_path.exists():
-        logger.error(f"Config file not found: {config_path}")
+        logger.error("Config file not found: %s", config_path)
         return 1
-    
+
     # Generate training config
     generator = TTSTrainingConfigGenerator(config_path)
-    
+
     # Get dataset path
     if args.dataset_path:
         dataset_path = args.dataset_path
     else:
         dataset_path = generator.paths.get('hf_dataset', '')
-    
+
     if not dataset_path or not Path(dataset_path).exists():
-        logger.error(f"Dataset path does not exist: {dataset_path}")
+        logger.error("Dataset path does not exist: %s", dataset_path)
         logger.error("Please run prepare_tts_dataset.py first or specify --dataset_path")
         return 1
-    
+
     # Generate config
     output_config_path = Path(args.output_config)
     training_config = generator.generate_training_config(
@@ -362,24 +361,24 @@ def main():
         push_to_hub=args.push_to_hub,
         hub_model_id=args.hub_model_id
     )
-    
+
     if args.generate_config_only:
         logger.info("\nConfig generation complete. Exiting without training.")
-        logger.info(f"To train, run: accelerate launch finetune-hf-vits/run_vits_finetuning.py {output_config_path}")
+        logger.info("To train, run: accelerate launch finetune-hf-vits/run_vits_finetuning.py %s", output_config_path)
         return 0
-    
+
     # Setup finetune-hf-vits
     finetune_dir = Path("finetune-hf-vits")
     if not setup_finetune_vits():
         logger.error("Failed to setup finetune-hf-vits")
         return 1
-    
+
     # Check if we need to convert the discriminator checkpoint
     base_model = generator.language.get('base_model', '')
     if base_model.startswith('facebook/mms-tts-'):
         # Extract language code from model name (e.g., 'facebook/mms-tts-hak' -> 'hak')
         language_code = base_model.split('-')[-1]
-        
+
         # Get converted model path from config, or use default location
         converted_model_dir = generator.paths.get('training_model')
         if not converted_model_dir:
@@ -388,29 +387,29 @@ def main():
             converted_model_dir = dataset_parent / f"mms-tts-{language_code}-train"
         else:
             converted_model_dir = Path(converted_model_dir)
-        
-        logger.info(f"\nChecking for training checkpoint with discriminator...")
-        logger.info(f"Base model: {base_model}")
-        logger.info(f"Language code: {language_code}")
-        logger.info(f"Training model path: {converted_model_dir}")
-        
+
+        logger.info("\nChecking for training checkpoint with discriminator...")
+        logger.info("Base model: %s", base_model)
+        logger.info("Language code: %s", language_code)
+        logger.info("Training model path: %s", converted_model_dir)
+
         # Convert the checkpoint if needed
         if not convert_discriminator_checkpoint(language_code, converted_model_dir, finetune_dir):
             logger.error("Failed to convert discriminator checkpoint")
             return 1
-        
+
         # Update the training config to use the converted model
-        logger.info(f"\nUpdating training config to use converted model: {converted_model_dir}")
-        with open(output_config_path, 'r') as f:
+        logger.info("\nUpdating training config to use converted model: %s", converted_model_dir)
+        with open(output_config_path, 'r', encoding="utf-8") as f:
             config_data = json.load(f)
         config_data['model_name_or_path'] = str(converted_model_dir)
-        with open(output_config_path, 'w') as f:
+        with open(output_config_path, 'w', encoding="utf-8") as f:
             json.dump(config_data, f, indent=4)
         logger.info("Training config updated successfully")
-    
+
     # Run training
     success = run_training(output_config_path, finetune_dir)
-    
+
     return 0 if success else 1
 
 

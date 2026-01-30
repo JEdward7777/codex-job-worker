@@ -4,17 +4,16 @@ Calculate total duration of audio files in a directory.
 Supports various audio formats including m4a, mp3, wav, flac, ogg, webm.
 """
 
-import json
-import os
 import subprocess
 import sys
 from pathlib import Path
 from typing import List, Tuple
+from mutagen import File
 
 
 def get_audio_duration(file_path: Path) -> float:
     """Get duration of an audio file in seconds.
-    
+
     Returns 0 if file cannot be read or is not a valid audio file.
     """
     try:
@@ -36,7 +35,7 @@ def get_audio_duration(file_path: Path) -> float:
                 duration_str = result.stdout.strip()
                 if duration_str != 'N/A':
                     return float(duration_str)
-            
+
             # If duration not in metadata, decode the file to get actual duration
             result = subprocess.run(
                 [
@@ -69,25 +68,24 @@ def get_audio_duration(file_path: Path) -> float:
                                 # Keep updating with the latest time value
                                 if duration > 0:
                                     last_duration = duration
-            
+
             # Return the last duration found
             if 'last_duration' in locals():
-                return last_duration
-                
+                return last_duration #pylint: disable=possibly-used-before-assignment
+
         except (subprocess.TimeoutExpired, FileNotFoundError, ValueError):
             pass
-        
+
         # Fallback to mutagen (handles most formats with duration in metadata)
         try:
-            from mutagen import File
             audio = File(file_path)
             if audio is not None and hasattr(audio.info, 'length'):
                 return audio.info.length
         except ImportError:
             pass
-        
+
         return 0
-        
+
     except Exception as e:
         print(f"Error reading {file_path.name}: {e}")
         return 0
@@ -95,38 +93,38 @@ def get_audio_duration(file_path: Path) -> float:
 
 def scan_directory(directory: Path) -> List[Tuple[Path, float]]:
     """Scan directory for audio files and get their durations.
-    
+
     Returns list of (file_path, duration_seconds) tuples.
     """
     audio_extensions = {'.m4a', '.mp3', '.wav', '.flac', '.ogg', '.webm', '.opus', '.aac'}
     results = []
-    
+
     if not directory.exists():
         print(f"Error: Directory does not exist: {directory}")
         return results
-    
+
     print(f"Scanning directory: {directory}")
     print()
-    
+
     audio_files = [f for f in directory.iterdir() if f.is_file() and f.suffix.lower() in audio_extensions]
-    
+
     if not audio_files:
         print("No audio files found in directory")
         return results
-    
+
     print(f"Found {len(audio_files)} audio files")
     print("Calculating durations...")
     print()
-    
+
     for idx, file_path in enumerate(sorted(audio_files), 1):
         duration = get_audio_duration(file_path)
         results.append((file_path, duration))
-        
+
         if duration > 0:
             print(f"[{idx}/{len(audio_files)}] {file_path.name}: {duration:.2f}s")
         else:
             print(f"[{idx}/{len(audio_files)}] {file_path.name}: Could not read")
-    
+
     return results
 
 
@@ -135,7 +133,7 @@ def format_duration(seconds: float) -> str:
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
     secs = seconds % 60
-    
+
     if hours > 0:
         return f"{hours}h {minutes}m {secs:.1f}s"
     elif minutes > 0:
@@ -152,18 +150,18 @@ def main():
         print("Example:")
         print("  python calculate_audio_duration.py /path/to/audio/files")
         sys.exit(1)
-    
+
     directory = Path(sys.argv[1])
     results = scan_directory(directory)
-    
+
     if not results:
         sys.exit(1)
-    
+
     # Calculate statistics
     total_duration = sum(duration for _, duration in results)
     valid_files = sum(1 for _, duration in results if duration > 0)
     invalid_files = len(results) - valid_files
-    
+
     print()
     print("=" * 60)
     print("SUMMARY")
@@ -178,21 +176,21 @@ def main():
     print(f"Total duration (minutes): {total_duration/60:.2f}m")
     print(f"Total duration (hours): {total_duration/3600:.2f}h")
     print()
-    
+
     if valid_files > 0:
         avg_duration = total_duration / valid_files
         max_duration = max(duration for _, duration in results if duration > 0)
         print(f"Average duration per file: {format_duration(avg_duration)}")
         print(f"Maximum duration: {format_duration(max_duration)}")
         print()
-    
+
     # Provide context for TTS/STT training
     print("=" * 60)
     print("TRAINING DATA ASSESSMENT")
     print("=" * 60)
-    
+
     hours = total_duration / 3600
-    
+
     if hours < 0.5:
         print("⚠️  Very limited data (< 30 minutes)")
         print("   - Not enough for TTS training")

@@ -4,10 +4,10 @@ Script to analyze TensorBoard logs and find the checkpoint with the best validat
 """
 
 import os
-import yaml
-import argparse
-from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 import glob
+import argparse
+import yaml
+from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 def find_best_checkpoint(log_dir, val_loss_metric='val_loss_mel_kl'):
     """Find the checkpoint with the lowest validation loss from TensorBoard logs."""
@@ -95,7 +95,7 @@ def main():
 
     # Load configuration
     print(f"Loading configuration from {args.config}")
-    with open(args.config, 'r') as f:
+    with open(args.config, 'r', encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
     # Get TensorBoard logs path from config
@@ -134,7 +134,7 @@ def main():
         config['missing_verses_generation']['tts_model_path'] = os.path.join(checkpoints_dir, result['best_checkpoint'])
 
         # Save updated config
-        with open(args.config, 'w') as f:
+        with open(args.config, 'w', encoding="utf-8") as f:
             yaml.safe_dump(config, f, default_flow_style=False)
 
         print(f"\nUpdated {args.config} with best checkpoint path")
