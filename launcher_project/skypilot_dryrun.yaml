@@ -14,28 +14,20 @@
 name: codex-dryrun
 
 resources:
-  # Use Vast.ai for cheap GPU testing
   cloud: vast
-  # Use a smaller/cheaper GPU for dry run testing
   accelerators: RTX3060:1
-  # Or use CPU-only for even cheaper testing:
-  # accelerators: null
-  # cpus: 4
 
 num_nodes: 1
 
-# Setup runs once when the cluster is provisioned
 setup: |
   set -e
   echo "=========================================="
   echo "Setting up codex-job-worker (DRY RUN)"
   echo "=========================================="
 
-  # Install system dependencies
   sudo apt-get update
   sudo apt-get install -y git ffmpeg
 
-  # Clone and setup the worker
   REPO_URL="https://github.com/JEdward7777/codex-job-worker.git"
   INSTALL_DIR="$HOME/codex-job-worker"
 
@@ -49,19 +41,16 @@ setup: |
     git submodule update --init --recursive
   fi
 
-  # Install uv
   if ! command -v uv &> /dev/null; then
     echo "Installing uv package manager..."
     curl -LsSf https://astral.sh/uv/install.sh | sh
   fi
   export PATH="$HOME/.local/bin:$PATH"
 
-  # Install Python dependencies
   echo "Installing Python dependencies..."
   cd "$INSTALL_DIR"
   uv sync
 
-  # Apply patches
   echo "Applying patches to submodules..."
   ./apply_submodule_patches.sh
 
@@ -70,7 +59,6 @@ setup: |
   echo "Setup complete!"
   echo "=========================================="
 
-# Run executes the dry run test
 run: |
   set -e
   export PATH="$HOME/.local/bin:$PATH"
@@ -81,58 +69,26 @@ run: |
   echo "=========================================="
   echo ""
 
-  # Validate required environment variables
   if [ -z "$GITLAB_TOKEN" ]; then
     echo "ERROR: GITLAB_TOKEN environment variable is required"
     exit 1
   fi
 
-  # List available jobs (this proves GitLab connectivity works)
   echo "Connecting to GitLab and listing available jobs..."
   echo ""
 
-  uv run python -c "
-import json
-from gitlab_jobs import GitLabJobScanner
-
-print('Initializing GitLab scanner...')
-scanner = GitLabJobScanner(verbose=True)
-
-print('\\nScanning for available jobs...')
-jobs = scanner.list_available_jobs()
-
-print('\\n' + '=' * 60)
-print(f'Found {len(jobs)} available jobs:')
-print('=' * 60)
-
-for job in jobs:
-    print(f\"\\nJob ID: {job.get('job_id')}\")
-    print(f\"  Project: {job.get('project_id')}\")
-    print(f\"  Type: {job.get('job_type')}\")
-    print(f\"  Mode: {job.get('mode')}\")
-    print(f\"  Claimed: {job.get('is_claimed')}\")
-
-if not jobs:
-    print('\\nNo jobs available (this is normal if no jobs have been created)')
-    print('The important thing is that GitLab connectivity works!')
-
-print('\\n' + '=' * 60)
-print('DRY RUN COMPLETE - GitLab connectivity verified!')
-print('=' * 60)
-"
+  uv run python gitlab_jobs.py list_available_jobs --verbose
 
   echo ""
   echo "=========================================="
+  echo "DRY RUN COMPLETE - GitLab connectivity verified!"
+  echo "=========================================="
+  echo ""
   echo "Machine will stay running for exploration"
   echo "SSH in with: sky ssh codex-dryrun"
-  echo "=========================================="
   echo ""
-
-  # Keep the machine running indefinitely
-  # Press Ctrl+C or run 'sky down codex-dryrun' to stop
-  echo "Sleeping indefinitely... (Ctrl+C to stop, or 'sky down codex-dryrun')"
+  echo "Sleeping indefinitely... (Ctrl+C to stop, or sky down codex-dryrun)"
   sleep infinity
 
 envs:
-  # GITLAB_TOKEN must be provided via --env-file or --env
   WORK_DIR: "/tmp/gpu_work"

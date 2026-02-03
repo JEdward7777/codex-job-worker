@@ -24,7 +24,7 @@ resources:
   # Supported clouds: aws, gcp, azure, lambda, runpod, kubernetes, vast
   # Change this to your preferred cloud provider
   cloud: vast  # Vast.ai - often has the best GPU pricing
-  accelerators: A10G:1  # Adjust based on your needs
+  accelerators: RTX3060:1  # Adjust based on your needs
   # For training, you may want more powerful GPUs:
   # accelerators: A100:1
   # accelerators: V100:1

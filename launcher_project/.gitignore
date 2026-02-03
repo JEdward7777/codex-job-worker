@@ -1,0 +1,14 @@
+# Secrets - NEVER commit these
+.env
+.env.*
+*.secrets
+
+# uv lock file (regenerated on sync)
+uv.lock
+
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
