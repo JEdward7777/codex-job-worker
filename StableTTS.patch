@@ -1,12 +1,12 @@
---- a/StableTTS/datas/dataset.py
-+++ b/StableTTS/datas/dataset.py
+--- a/datas/dataset.py
++++ b/datas/dataset.py
 @@ -24,11 +24,18 @@ class StableDataset(Dataset):
          self._load_filelist(filelist_path)
- 
+
      def _load_filelist(self, filelist_path):
 +        # Get the directory containing the JSON file for resolving relative paths
 +        json_dir = os.path.dirname(os.path.abspath(filelist_path))
-+        
++
          filelist, lengths = [], []
          with open(filelist_path, 'r', encoding='utf-8') as f:
              for line in f:
@@ -18,5 +18,5 @@
 +                    mel_path = os.path.join(json_dir, mel_path)
 +                filelist.append((mel_path, line['phone']))
                  lengths.append(line['mel_length'])
-             
+
          self.filelist = filelist
