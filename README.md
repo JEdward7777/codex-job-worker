@@ -4,7 +4,14 @@ A GPU worker system that processes Text-to-Speech (TTS) and Automatic Speech Rec
 
 ## Overview
 
-This project provides a complete pipeline for:
+This project provides a **unified GPU worker** ([`worker_entry.py`](worker_entry.py)) that:
+
+1. **Claims jobs** from GitLab repositories via a YAML manifest system
+2. **Dynamically loads handlers** based on job type, model type, and mode
+3. **Executes training/inference** using the appropriate handler
+4. **Uploads results** back to GitLab (models, audio files, `.codex` updates)
+
+### Supported Job Types
 
 - **TTS Training**: Train StableTTS models on audio-text pairs from Bible translation projects
 - **TTS Inference**: Generate speech audio for verses that have text but no recordings
@@ -12,6 +19,17 @@ This project provides a complete pipeline for:
 - **ASR Inference**: Transcribe audio recordings to text
 
 The system is designed to run on GPU workers launched via [SkyPilot](https://skypilot.readthedocs.io/), with jobs coordinated through a GitLab-based manifest system.
+
+### Codex Editor Integration
+
+Jobs are created through a **Codex Editor plugin** that provides a user-friendly interface for:
+- Creating TTS/ASR training and inference jobs
+- Selecting voice references and model checkpoints
+- Monitoring job progress and results
+
+> **Download Codex Editor**: [codexeditor.app](https://codexeditor.app/)
+
+The plugin generates the `gpu_jobs/manifest.yaml` file that this worker consumes. See [Job Manifest System](#job-manifest-system) for details on the manifest format.
 
 ## Architecture
 

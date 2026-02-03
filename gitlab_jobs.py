@@ -132,6 +132,11 @@ class GitLabJobScanner:
                 "No GitLab token provided. Use --token parameter or set GITLAB_TOKEN environment variable."
             )
 
+        # Add aliases for compatibility with GitLabDatasetDownloader interface
+        # Handlers expect these attribute names when creating GitLabDatasetDownloader instances
+        self.server_url = self.gitlab_url
+        self.access_token = self.token
+
         # Initialize GitLab connection
         self.gl = self._connect_to_gitlab()
 
