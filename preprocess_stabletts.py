@@ -27,7 +27,7 @@ import json
 import csv
 import argparse
 from typing import Optional, Callable, Dict, Any
-from dataclasses import dataclass, asdict
+from dataclasses import asdict
 import traceback
 from tqdm import tqdm
 
@@ -41,7 +41,7 @@ from uroman import Uroman
 # Add StableTTS to path to import its modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'StableTTS'))
 
-from config import MelConfig, TrainConfig #pylint: disable=import-error, wrong-import-position
+from config import MelConfig #pylint: disable=import-error, wrong-import-position
 from utils.audio import LogMelSpectrogram, load_and_resample_audio #pylint: disable=import-error, wrong-import-position
 
 from text.mandarin import chinese_to_cnm3 #pylint: disable=import-error, wrong-import-position

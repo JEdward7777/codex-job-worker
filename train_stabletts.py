@@ -50,7 +50,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'StableTTS'))
 from datas.dataset import StableDataset, collate_fn          #pylint: disable=import-error, wrong-import-position
 from datas.sampler import DistributedBucketSampler           #pylint: disable=import-error, wrong-import-position
 from text import symbols                                     #pylint: disable=import-error, wrong-import-position
-from config import MelConfig, ModelConfig, TrainConfig       #pylint: disable=import-error, wrong-import-position
+from config import MelConfig, ModelConfig                    #pylint: disable=import-error, wrong-import-position
 from models.model import StableTTS                           #pylint: disable=import-error, wrong-import-position
 from utils.scheduler import get_cosine_schedule_with_warmup  #pylint: disable=import-error, wrong-import-position
 
