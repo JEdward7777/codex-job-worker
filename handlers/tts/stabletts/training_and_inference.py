@@ -17,6 +17,7 @@ import json
 import traceback
 import uuid
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, Any
 
@@ -563,36 +564,56 @@ def _download_training_data(
 
             print(f"      Found {len(pairs)} audio-transcription pairs")
 
-            # Download audio files and add to samples
-            for pair_i, pair in enumerate(pairs):
-                if pair_i % 100 == 0 or pair_i == len(pairs)-1:
-                    print( f"Downloading pair {pair_i} of {len(pairs)}")
-
-                audio_url = pair['audio_url']
+            # Download audio files in parallel (5 at a time) and add to samples
+            def _download_one_pair(pair):
+                """Download a single audio file. Returns (pair, success)."""
                 transcription = pair['transcription']
                 verse_id = pair['verse_id']
 
                 # Skip pairs without transcription text
                 if not transcription or not transcription.strip():
-                    continue
+                    return (pair, False)
 
-                # Get filename from URL
-                audio_filename = Path(audio_url).name
+                audio_filename = Path(pair['audio_url']).name
                 local_audio_path = audio_dir / audio_filename
+                tmp_path = Path(str(local_audio_path) + '.tmp')
 
-                # Download if not already present
-                if not local_audio_path.exists():
-                    if downloader.download_file(audio_url, local_audio_path):
-                        pass  # Success
-                    else:
-                        print(f"      Warning: Could not download audio for {verse_id}")
-                        continue
+                # Clean up any stale .tmp file from a previous interrupted download
+                if tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
 
-                samples.append({
-                    'file_name': f"audio/{audio_filename}",
-                    'transcription': transcription,
-                    'verse_id': verse_id
-                })
+                # Already downloaded (only trust the final file, not .tmp)
+                if local_audio_path.exists():
+                    return (pair, True)
+
+                if downloader.download_file(pair['audio_url'], local_audio_path):
+                    return (pair, True)
+                else:
+                    print(f"      Warning: Could not download audio for {verse_id}")
+                    return (pair, False)
+
+            max_workers = 5
+            completed_count = 0
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = {executor.submit(_download_one_pair, p): p for p in pairs}
+
+                for future in as_completed(futures):
+                    pair, success = future.result()
+                    completed_count += 1
+
+                    if completed_count % 100 == 0 or completed_count == len(pairs):
+                        print(f"      Downloaded {completed_count} of {len(pairs)}")
+
+                    if success:
+                        audio_filename = Path(pair['audio_url']).name
+                        samples.append({
+                            'file_name': f"audio/{audio_filename}",
+                            'transcription': pair['transcription'],
+                            'verse_id': pair['verse_id']
+                        })
 
             callbacks.heartbeat(message=f"Downloaded {len(samples)} training samples")
 
