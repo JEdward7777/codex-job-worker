@@ -320,7 +320,8 @@ class GitLabDatasetDownloader:
                     size = int(size_line[0].split(' ', 1)[1].strip())
 
                     # Use GitLab LFS batch API to get download URL
-                    lfs_batch_url = f"{self.server_url}/{self.config['gitlab']['project_id']}.git/info/lfs/objects/batch"
+                    project_path = self._get_project_path_for_lfs()
+                    lfs_batch_url = f"{self.server_url}/{project_path}.git/info/lfs/objects/batch"
 
                     lfs_batch_payload = {
                         "operation": "download",
