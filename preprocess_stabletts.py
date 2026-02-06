@@ -95,13 +95,8 @@ def load_metadata_csv(csv_path, audio_base_dir):
     with open(csv_path, 'r', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         for idx, row in enumerate(reader):
-            audio_path = row['file_name']
+            audio_path = os.path.join( os.path.dirname(csv_path ), row['file_name'] )
             text = row['transcription']
-
-            # Resolve audio path relative to audio_base_dir
-            if not os.path.isabs(audio_path):
-                audio_path = os.path.join(audio_base_dir, audio_path)
-
             file_list.append((str(idx), audio_path, text))
 
     return file_list
