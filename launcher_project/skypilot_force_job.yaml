@@ -9,17 +9,21 @@
 # If the job is unclaimed, it creates the claim with the provided WORKER_ID.
 #
 # Usage:
-#   # Set secrets as environment variables first
-#   export GITLAB_TOKEN=your_gitlab_token
-#   export WORKER_ID=your_worker_id
-#
-#   # Launch with SkyPilot - specify the job to force-run
+#   # Option A: Set local env vars first, then --env passes them through
+#   export GITLAB_TOKEN=glpat-xxxxx
+#   export WORKER_ID=my-worker-1
 #   sky launch skypilot_force_job.yaml \
 #     --env GITLAB_TOKEN \
 #     --env WORKER_ID \
 #     --env FORCE_JOB=123:my_job_42
 #
-#   # Or use an env file
+#   # Option B: Specify values inline
+#   sky launch skypilot_force_job.yaml \
+#     --env GITLAB_TOKEN=glpat-xxxxx \
+#     --env WORKER_ID=my-worker-1 \
+#     --env FORCE_JOB=123:my_job_42
+#
+#   # Option C: Use an env file for secrets
 #   sky launch skypilot_force_job.yaml --env-file .env.secrets --env FORCE_JOB=123:my_job_42
 #
 # FORCE_JOB format: PROJECT_ID:JOB_ID

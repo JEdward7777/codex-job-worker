@@ -364,12 +364,19 @@ class GitLabJobScanner:
         self._log(f"Scan complete. Scanned {len(all_projects)} projects.")
         return all_projects
 
-    def list_available_jobs(self) -> List[Dict[str, Any]]:
+    def list_available_jobs(self, include_claimed: bool = False) -> List[Dict[str, Any]]:
         """
-        List all available (unclaimed, non-canceled) GPU jobs.
+        List GPU jobs.
+
+        By default, lists only available (unclaimed, non-canceled) jobs.
+        With include_claimed=True, also includes claimed jobs.
+
+        Args:
+            include_claimed: If True, include claimed jobs in the results.
+                           Canceled jobs are always excluded.
 
         Returns:
-            List of available job dictionaries (same format as from get_job_status)
+            List of job dictionaries (same format as from get_job_status)
         """
         all_projects = self.scan_all_projects()
 
@@ -380,24 +387,20 @@ class GitLabJobScanner:
             if not project.get('jobs'):
                 continue
 
-
-
-
-
             for job in project['jobs']:
-                # Check if job is available:
-                # - Not canceled
-                # - Not claimed
+                # Always skip canceled jobs
                 if job.get('canceled') is True:
                     continue
 
-                if job.get('is_claimed') is True:
+                # Skip claimed jobs unless include_claimed is set
+                if job.get('is_claimed') is True and not include_claimed:
                     continue
 
-                # Job is available - add it directly
+                # Job passes filters - add it
                 available_jobs.append(job)
 
-        self._log(f"Found {len(available_jobs)} available jobs.")
+        label = "total" if include_claimed else "available"
+        self._log(f"Found {len(available_jobs)} {label} jobs.")
         return available_jobs
 
     @retry_with_backoff()
