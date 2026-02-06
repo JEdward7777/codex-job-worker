@@ -379,8 +379,16 @@ def _download_training_data(
 
                 audio_filename = Path(pair['audio_url']).name
                 local_audio_path = audio_dir / audio_filename
+                tmp_path = Path(str(local_audio_path) + '.tmp')
 
-                # Already downloaded
+                # Clean up any stale .tmp file from a previous interrupted download
+                if tmp_path.exists():
+                    try:
+                        tmp_path.unlink()
+                    except OSError:
+                        pass
+
+                # Already downloaded (only trust the final file, not .tmp)
                 if local_audio_path.exists():
                     return (pair, True)
 

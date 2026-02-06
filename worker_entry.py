@@ -358,7 +358,8 @@ def process_job(
     job: Dict[str, Any],
     scanner: GitLabJobScanner,
     worker_id: str,
-    base_work_dir: Path
+    base_work_dir: Path,
+    force_mode: bool = False
 ) -> bool:
     """
     Process a single job.
@@ -369,9 +370,14 @@ def process_job(
     job_id = job['job_id']
     project_id = job['project_id']
 
-    # Create job-specific work directory with timestamp
-    timestamp = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
-    work_dir = base_work_dir / f"job_{job_id}_{timestamp}"
+    # Create job-specific work directory.
+    # In force mode (debugging), omit the timestamp so the same directory is
+    # reused across runs — this allows previously downloaded data to be found.
+    if force_mode:
+        work_dir = base_work_dir / f"job_{job_id}"
+    else:
+        timestamp = datetime.now().strftime('%Y-%m-%dT%H-%M-%S')
+        work_dir = base_work_dir / f"job_{job_id}_{timestamp}"
     work_dir.mkdir(parents=True, exist_ok=True)
 
     # Setup logging
@@ -627,7 +633,7 @@ def main():
                     job = scanner.get_job_status(project_id, job_id)
 
                 # Run the job
-                success = process_job(job, scanner, args.worker_id, work_dir)
+                success = process_job(job, scanner, args.worker_id, work_dir, force_mode=True)
                 jobs_processed += 1
                 if success:
                     jobs_succeeded += 1

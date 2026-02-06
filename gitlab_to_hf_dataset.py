@@ -295,11 +295,16 @@ class GitLabDatasetDownloader:
     def download_file_gitlab(self, file_path: str, output_path: Path) -> bool:
         """Download a file from GitLab repository.
 
+        Downloads to a temporary .tmp file first, then atomically renames to
+        the final path.  This prevents partially-downloaded files from being
+        mistaken for complete downloads on subsequent runs.
+
         Args:
             file_path: Path to file in repository
             output_path: Local path to save file
         """
         url = f"{self.server_url}/api/v4/projects/{self.project_id_for_api}/repository/files/{quote(file_path, safe='')}/raw"
+        tmp_path = Path(str(output_path) + '.tmp')
 
         try:
             # First attempt: regular download
@@ -357,14 +362,15 @@ class GitLabDatasetDownloader:
                             download_url = obj['actions']['download']['href']
                             download_headers = obj['actions']['download'].get('header', {})
 
-                            # Download the actual LFS file
+                            # Download the actual LFS file to tmp, then rename
                             lfs_response = requests.get(download_url, headers=download_headers, stream=True)
                             lfs_response.raise_for_status()
 
-                            with open(output_path, 'wb') as f:
+                            with open(tmp_path, 'wb') as f:
                                 for chunk in lfs_response.iter_content(chunk_size=8192):
                                     f.write(chunk)
 
+                            os.replace(tmp_path, output_path)
                             return True
                         else:
                             print(f"No download action in LFS batch response for {file_path}")
@@ -376,13 +382,20 @@ class GitLabDatasetDownloader:
                     print(f"Could not parse LFS OID/size from {file_path}")
                     return False
             else:
-                # Regular file, save it
-                with open(output_path, 'wb') as f:
+                # Regular file — write to tmp, then atomic rename
+                with open(tmp_path, 'wb') as f:
                     f.write(response.content)
 
+                os.replace(tmp_path, output_path)
                 return True
 
         except Exception as e:
+            # Clean up partial tmp file on failure
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
             print(f"Error downloading {file_path}: {e}")
             return False
 
