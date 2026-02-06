@@ -564,7 +564,10 @@ def _download_training_data(
             print(f"      Found {len(pairs)} audio-transcription pairs")
 
             # Download audio files and add to samples
-            for pair in pairs:
+            for pair_i, pair in enumerate(pairs):
+                if pair_i % 100 == 0 or pair_i == len(pairs)-1:
+                    print( f"Downloading pair {pair_i} of {len(pairs)}")
+
                 audio_url = pair['audio_url']
                 transcription = pair['transcription']
                 verse_id = pair['verse_id']
