@@ -6,9 +6,13 @@ Main entry point for the GPU worker that processes TTS and ASR jobs from GitLab.
 Scans for available jobs, claims them, executes handlers, and uploads results.
 
 Usage:
+    # Normal mode: scan and claim next available job
     python worker_entry.py --token YOUR_TOKEN --worker-id gpu-worker-1
     python worker_entry.py --loop-interval 300  # Poll every 5 minutes
     python worker_entry.py --work-dir /tmp/gpu_work --keep-jobs 10
+
+    # Force mode: skip claim, run a specific already-claimed job
+    python worker_entry.py --token YOUR_TOKEN --worker-id any --force-job 123:my_job_1
 """
 
 import os
@@ -24,7 +28,7 @@ from datetime import datetime, timezone
 import yaml
 
 from gitlab.exceptions import GitlabCreateError
-from gitlab_jobs import GitLabJobScanner, NoJobsAvailableError, DEFAULT_GITLAB_URL
+from gitlab_jobs import GitLabJobScanner, NoJobsAvailableError, DEFAULT_GITLAB_URL, RESPONSE_FILE_PATH_TEMPLATE
 
 
 class JobCanceledException(Exception):
@@ -525,6 +529,14 @@ def main():
         help='Enable verbose output'
     )
 
+    # Force-run a specific job (skip claim)
+    parser.add_argument(
+        '--force-job',
+        type=str,
+        default=None,
+        help='Force-run a specific job, skipping claim. Format: PROJECT_ID:JOB_ID'
+    )
+
     args = parser.parse_args()
 
     # Validate required arguments
@@ -546,7 +558,10 @@ def main():
     print(f"Worker ID: {args.worker_id}")
     print(f"GitLab URL: {args.gitlab_url}")
     print(f"Work Directory: {work_dir.absolute()}")
-    print(f"Loop Interval: {args.loop_interval}s" if args.loop_interval >= 0 else "Loop Interval: Exit when done")
+    if args.force_job:
+        print(f"FORCE MODE: {args.force_job}")
+    else:
+        print(f"Loop Interval: {args.loop_interval}s" if args.loop_interval >= 0 else "Loop Interval: Exit when done")
     print(f"Keep Jobs: {args.keep_jobs}")
     print("=" * 60)
     print()
@@ -568,19 +583,76 @@ def main():
 
     while True:
         try:
-            print("Scanning for available jobs...")
-            job = scanner.claim_next_job(args.worker_id)
+            if args.force_job:
+                # === FORCE MODE: skip claim, run a specific job ===
+                try:
+                    project_id_str, job_id = args.force_job.split(':', 1)
+                    project_id = int(project_id_str)
+                except ValueError:
+                    print(f"ERROR: Invalid --force-job format: '{args.force_job}'")
+                    print("Expected format: PROJECT_ID:JOB_ID (e.g., 123:my_job_1)")
+                    sys.exit(1)
 
-            print(f"Claimed job: {job['job_id']}")
+                print(f"FORCE MODE: Running job {job_id} from project {project_id} (skipping claim)")
 
-            success = process_job(job, scanner, args.worker_id, work_dir)
+                # Fetch job metadata without claiming
+                job = scanner.get_job_status(project_id, job_id)
+                if not job:
+                    print(f"ERROR: Job {job_id} not found in project {project_id}")
+                    sys.exit(1)
 
-            jobs_processed += 1
-            if success:
-                jobs_succeeded += 1
+                if job.get('is_claimed') and job.get('response'):
+                    # Job already claimed — adopt the existing worker_id
+                    # so heartbeat checks pass without modifying response.yaml
+                    existing_worker_id = job['response'].get('worker_id')
+                    if existing_worker_id:
+                        print(f"FORCE MODE: Adopting existing worker_id: {existing_worker_id}")
+                        args.worker_id = existing_worker_id
+                else:
+                    # Job not yet claimed — create claim with our worker_id
+                    print(f"FORCE MODE: Job not claimed yet, creating claim with worker_id: {args.worker_id}")
+                    response_path = RESPONSE_FILE_PATH_TEMPLATE.format(job_id=job_id)
+                    response_data = {
+                        'worker_id': args.worker_id,
+                        'state': 'running',
+                        'timestamp': datetime.now(timezone.utc).isoformat()
+                    }
+                    scanner.create_file(
+                        project_id=project_id,
+                        file_path=response_path,
+                        content=yaml.dump(response_data, default_flow_style=False, sort_keys=False),
+                        commit_message=f"Worker {args.worker_id} force-claims job {job_id}"
+                    )
+                    # Re-fetch job status now that it's claimed
+                    job = scanner.get_job_status(project_id, job_id)
 
-            # Cleanup old job directories
-            cleanup_old_jobs(work_dir, args.keep_jobs)
+                # Run the job
+                success = process_job(job, scanner, args.worker_id, work_dir)
+                jobs_processed += 1
+                if success:
+                    jobs_succeeded += 1
+
+                # Cleanup old job directories
+                cleanup_old_jobs(work_dir, args.keep_jobs)
+
+                # Force mode: run once and exit
+                break
+
+            else:
+                # === NORMAL MODE: scan and claim next available job ===
+                print("Scanning for available jobs...")
+                job = scanner.claim_next_job(args.worker_id)
+
+                print(f"Claimed job: {job['job_id']}")
+
+                success = process_job(job, scanner, args.worker_id, work_dir)
+
+                jobs_processed += 1
+                if success:
+                    jobs_succeeded += 1
+
+                # Cleanup old job directories
+                cleanup_old_jobs(work_dir, args.keep_jobs)
 
         except NoJobsAvailableError:
             print("No jobs available.")
@@ -599,6 +671,10 @@ def main():
         except Exception as e:
             print(f"ERROR: Unexpected error: {e}")
             print(traceback.format_exc())
+
+            # In force mode, don't loop on error — exit immediately
+            if args.force_job:
+                sys.exit(1)
 
             if args.loop_interval < 0:
                 sys.exit(1)

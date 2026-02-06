@@ -41,9 +41,9 @@ setup: |
 
   # Install system dependencies
   sudo apt-get update
-  sudo apt-get install -y git ffmpeg
+  sudo apt-get install -y git ffmpeg curl
 
-  # Clone and setup the worker
+  # Clone the worker repository
   REPO_URL="https://github.com/JEdward7777/codex-job-worker.git"
   INSTALL_DIR="$HOME/codex-job-worker"
 
@@ -55,18 +55,9 @@ setup: |
     git submodule update --init --recursive
   fi
 
-  # Install uv
-  if ! command -v uv &> /dev/null; then
-    curl -LsSf https://astral.sh/uv/install.sh | sh
-  fi
-  export PATH="$HOME/.local/bin:$PATH"
-
-  # Install Python dependencies
+  # Run the shared setup script (installs uv, dependencies, applies patches)
   cd "$INSTALL_DIR"
-  uv sync
-
-  # Apply patches
-  ./apply_submodule_patches.sh
+  bash setup_worker.sh
 
 # Run executes the actual task
 run: |

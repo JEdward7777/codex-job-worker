@@ -605,23 +605,23 @@ def inference_stabletts_api(
             pass
 
         args = Args()
-        args.checkpoint = checkpoint
-        args.input_csv = input_csv
-        args.output_dir = output_dir
-        args.reference_audio = reference_audio
-        args.language = language
-        args.text_column = text_column
-        args.diffusion_steps = diffusion_steps
-        args.temperature = temperature
-        args.length_scale = length_scale
-        args.cfg_scale = cfg_scale
-        args.solver = solver
-        args.use_uroman = use_uroman
-        args.uroman_lang = uroman_lang
-        args.batch_size = batch_size
-        args.audio_format = audio_format
-        args.resume = resume
-        args.overwrite = overwrite
+        args.checkpoint      = checkpoint        #pylint: disable=attribute-defined-outside-init
+        args.input_csv       = input_csv         #pylint: disable=attribute-defined-outside-init
+        args.output_dir      = output_dir        #pylint: disable=attribute-defined-outside-init
+        args.reference_audio = reference_audio   #pylint: disable=attribute-defined-outside-init
+        args.language        = language          #pylint: disable=attribute-defined-outside-init
+        args.text_column     = text_column       #pylint: disable=attribute-defined-outside-init
+        args.diffusion_steps = diffusion_steps   #pylint: disable=attribute-defined-outside-init
+        args.temperature     = temperature       #pylint: disable=attribute-defined-outside-init
+        args.length_scale    = length_scale      #pylint: disable=attribute-defined-outside-init
+        args.cfg_scale       = cfg_scale         #pylint: disable=attribute-defined-outside-init
+        args.solver          = solver            #pylint: disable=attribute-defined-outside-init
+        args.use_uroman      = use_uroman        #pylint: disable=attribute-defined-outside-init
+        args.uroman_lang     = uroman_lang       #pylint: disable=attribute-defined-outside-init
+        args.batch_size      = batch_size        #pylint: disable=attribute-defined-outside-init
+        args.audio_format    = audio_format      #pylint: disable=attribute-defined-outside-init
+        args.resume          = resume            #pylint: disable=attribute-defined-outside-init
+        args.overwrite       = overwrite         #pylint: disable=attribute-defined-outside-init
 
         # Create inference engine
         inference = StableTTSInference(args)

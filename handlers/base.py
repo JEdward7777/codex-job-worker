@@ -4,8 +4,6 @@ Base utilities for job handlers.
 This module provides shared functionality used by all handlers.
 """
 
-import os
-import sys
 import time
 import tarfile
 from io import BytesIO

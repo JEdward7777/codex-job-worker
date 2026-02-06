@@ -1,0 +1,115 @@
+# SkyPilot task file for force-running a specific job (skip claim)
+#
+# This is the "cheater launch" mechanism. Use it when a job has already been
+# claimed but you need to re-run it (e.g., after fixing a bug). It skips the
+# normal scan/claim cycle and directly runs the specified job.
+#
+# If the job is already claimed, the worker adopts the existing worker_id
+# from response.yaml so heartbeat checks pass naturally.
+# If the job is unclaimed, it creates the claim with the provided WORKER_ID.
+#
+# Usage:
+#   # Set secrets as environment variables first
+#   export GITLAB_TOKEN=your_gitlab_token
+#   export WORKER_ID=your_worker_id
+#
+#   # Launch with SkyPilot - specify the job to force-run
+#   sky launch skypilot_force_job.yaml \
+#     --env GITLAB_TOKEN \
+#     --env WORKER_ID \
+#     --env FORCE_JOB=123:my_job_42
+#
+#   # Or use an env file
+#   sky launch skypilot_force_job.yaml --env-file .env.secrets --env FORCE_JOB=123:my_job_42
+#
+# FORCE_JOB format: PROJECT_ID:JOB_ID
+#   PROJECT_ID = numeric GitLab project ID
+#   JOB_ID = job identifier from the manifest
+#
+# The worker runs the job once and exits (no polling loop).
+
+name: codex-force-job
+
+resources:
+  # Supported clouds: aws, gcp, azure, lambda, runpod, kubernetes, vast
+  cloud: vast  # Vast.ai - often has the best GPU pricing
+  accelerators: RTX3060:1  # Adjust based on your needs
+
+num_nodes: 1
+
+# Setup runs once when the cluster is provisioned
+setup: |
+  set -e
+
+  # Install system dependencies
+  sudo apt-get update
+  sudo apt-get install -y git ffmpeg curl
+
+  # Clone the worker repository
+  REPO_URL="https://github.com/JEdward7777/codex-job-worker.git"
+  INSTALL_DIR="$HOME/codex-job-worker"
+
+  if [ ! -d "$INSTALL_DIR" ]; then
+    git clone --recurse-submodules "$REPO_URL" "$INSTALL_DIR"
+  else
+    cd "$INSTALL_DIR"
+    git pull origin main || true
+    git submodule update --init --recursive
+  fi
+
+  # Run the shared setup script (installs uv, dependencies, applies patches)
+  cd "$INSTALL_DIR"
+  bash setup_worker.sh
+
+# Run executes the force-job task
+# After the job finishes (success or failure), the VM stays running so you
+# can SSH in and re-run the command manually for iterative debugging.
+run: |
+  export PATH="$HOME/.local/bin:$PATH"
+  cd $HOME/codex-job-worker
+
+  # Validate required environment variables
+  if [ -z "$GITLAB_TOKEN" ]; then
+    echo "ERROR: GITLAB_TOKEN environment variable is required"
+    echo "Launch with: sky launch skypilot_force_job.yaml --env GITLAB_TOKEN=your_token --env WORKER_ID=your_id --env FORCE_JOB=PROJECT_ID:JOB_ID"
+    exit 1
+  fi
+
+  if [ -z "$WORKER_ID" ]; then
+    echo "ERROR: WORKER_ID environment variable is required"
+    exit 1
+  fi
+
+  if [ -z "$FORCE_JOB" ]; then
+    echo "ERROR: FORCE_JOB environment variable is required"
+    echo "Format: PROJECT_ID:JOB_ID (e.g., 123:my_job_42)"
+    exit 1
+  fi
+
+  # Run the worker in force mode (runs once)
+  # We don't use 'set -e' here so the VM stays alive even if the job fails
+  uv run python worker_entry.py \
+    --token "$GITLAB_TOKEN" \
+    --worker-id "$WORKER_ID" \
+    --force-job "$FORCE_JOB" \
+    --verbose || echo "Worker exited with error code $? — VM will stay alive for debugging"
+
+  # The VM stays alive after the run block completes.
+  # SSH in to re-run or debug. Shut down with: sky down <cluster-name>
+  echo ""
+  echo "============================================================"
+  echo "Force job finished. VM is staying alive for debugging."
+  echo "SSH in with: ssh <cluster-name>"
+  echo "Re-run with: cd ~/codex-job-worker && uv run python worker_entry.py --force-job $FORCE_JOB --token \$GITLAB_TOKEN --worker-id \$WORKER_ID --verbose"
+  echo "Shut down with: sky down <cluster-name>"
+  echo "============================================================"
+
+# Environment variables
+envs:
+  # These are placeholders - actual values should be passed via --env flag
+  # GITLAB_TOKEN: ""  # Required - pass via --env GITLAB_TOKEN
+  # WORKER_ID: ""     # Required - pass via --env WORKER_ID
+  # FORCE_JOB: ""     # Required - pass via --env FORCE_JOB=PROJECT_ID:JOB_ID
+
+  # Optional: Work directory for job files
+  WORK_DIR: "/tmp/gpu_work"
