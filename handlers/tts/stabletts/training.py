@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 from gitlab_to_hf_dataset import GitLabDatasetDownloader
 from handlers.base import (
     download_pretrained_model,
+    resolve_use_uroman,
     STABLETTS_DEFAULT_REPO_ID,
     STABLETTS_DEFAULT_FILENAME,
 )
@@ -66,7 +67,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         model_type = model_config.get('type', 'StableTTS')
         base_checkpoint = model_config.get('base_checkpoint')
         language = model_config.get('language', 'english')
-        use_uroman = model_config.get('use_uroman', False)
+        # use_uroman is resolved after data download (may need auto-detection)
         uroman_lang = model_config.get('uroman_lang', None)
 
         # Get filter configuration
@@ -81,7 +82,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print(f"  Learning rate: {learning_rate}")
         print(f"  Validation split: {val_split}")
         print(f"  Base checkpoint: {base_checkpoint or 'None (will use default pretrained model)'}")
-        print(f"  Use uroman: {use_uroman}")
+        print(f"  Use uroman: {model_config.get('use_uroman', '<auto-detect>')}")
         if include_verses:
             print(f"  Include verses: {len(include_verses)} specified")
         if exclude_verses:
@@ -123,6 +124,10 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                 'success': False,
                 'error_message': "No training samples found. Check that cells have both audio and text."
             }
+
+        # Resolve use_uroman (auto-detect from text if not specified in manifest)
+        use_uroman = resolve_use_uroman(model_config, download_result.get('sample_texts', []))
+        print(f"  Use uroman: {use_uroman}")
 
         # Step 2: Preprocess data for StableTTS
         print("\nStep 2: Preprocessing data for StableTTS...")
@@ -430,6 +435,7 @@ def _download_training_data(
             'success': True,
             'metadata_csv': metadata_csv,
             'sample_count': len(samples),
+            'sample_texts': [s['transcription'] for s in samples],
             'error_message': None
         }
 

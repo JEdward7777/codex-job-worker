@@ -26,6 +26,7 @@ from handlers.base import (
     get_cell_id,
     cell_has_text,
     should_use_lfs,
+    resolve_use_uroman,
 )
 from gitlab_to_hf_dataset import GitLabDatasetDownloader
 
@@ -63,7 +64,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         checkpoint_path = model_config.get('checkpoint')
         reference_audio_path = model_config.get('reference_audio')
         language = model_config.get('language', 'english')
-        use_uroman = model_config.get('use_uroman', False)
+        # use_uroman is resolved after data download (may need auto-detection)
         uroman_lang = model_config.get('uroman_lang', None)
 
         # Get inference parameters
@@ -87,7 +88,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print(f"  Length scale: {length_scale}")
         print(f"  CFG scale: {cfg_scale}")
         print(f"  Audio format: {audio_format}")
-        print(f"  Use uroman: {use_uroman}")
+        print(f"  Use uroman: {model_config.get('use_uroman', '<auto-detect>')}")
         if include_verses:
             print(f"  Include verses: {len(include_verses)} specified")
         if exclude_verses:
@@ -183,6 +184,10 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                 'error_message': None,
                 'processed_count': 0
             }
+
+        # Resolve use_uroman (auto-detect from text if not specified in manifest)
+        use_uroman = resolve_use_uroman(model_config, download_result.get('sample_texts', []))
+        print(f"  Use uroman: {use_uroman}")
 
         # Step 4: Run inference
         print("\nStep 4: Running TTS inference...")
@@ -389,6 +394,7 @@ def _download_inference_data(
             'success': True,
             'metadata_csv': metadata_csv,
             'sample_count': len(samples),
+            'sample_texts': [s['transcription'] for s in samples],
             'codex_data': codex_data,
             'error_message': None
         }
@@ -398,6 +404,7 @@ def _download_inference_data(
             'success': False,
             'metadata_csv': None,
             'sample_count': 0,
+            'sample_texts': [],
             'codex_data': {},
             'error_message': f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
         }

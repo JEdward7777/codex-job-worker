@@ -6,6 +6,7 @@ This module provides shared functionality used by all handlers.
 
 import time
 import tarfile
+import unicodedata
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
@@ -367,6 +368,83 @@ def get_cells_with_audio_and_text(
         cell for cell in filtered
         if cell_has_audio(cell) and cell_has_text(cell)
     ]
+
+
+def detect_use_uroman(text: str, threshold: float = 0.5) -> bool:
+    """
+    Auto-detect whether uroman romanization is needed based on text content.
+
+    Examines the alphabetic characters in ``text`` and returns ``True`` when
+    more than ``threshold`` (default 50 %) of them are non-Latin script.
+
+    This is intended to be called with the first non-empty verse/transcription
+    from a dataset so that ``use_uroman`` can be inferred when the manifest
+    does not specify it explicitly.
+
+    Args:
+        text: Sample text to analyse (e.g. the first non-empty verse).
+        threshold: Fraction of non-Latin alphabetic characters above which
+            the function returns ``True``.  Defaults to ``0.5``.
+
+    Returns:
+        ``True`` if uroman romanization is likely needed, ``False`` otherwise.
+    """
+    latin_count = 0
+    non_latin_count = 0
+
+    for ch in text:
+        if not ch.isalpha():
+            continue
+        try:
+            name = unicodedata.name(ch, '')
+        except ValueError:
+            name = ''
+        if 'LATIN' in name:
+            latin_count += 1
+        else:
+            non_latin_count += 1
+
+    total = latin_count + non_latin_count
+    if total == 0:
+        return False
+    return (non_latin_count / total) > threshold
+
+
+def resolve_use_uroman(
+    model_config: Dict[str, Any],
+    sample_texts: List[str],
+) -> bool:
+    """
+    Determine the effective ``use_uroman`` value.
+
+    If the manifest explicitly sets ``model.use_uroman`` to ``True`` or
+    ``False``, that value is honoured.  When the key is absent (``None``),
+    the function auto-detects by inspecting the first non-empty entry in
+    *sample_texts* via :func:`detect_use_uroman`.
+
+    Args:
+        model_config: The ``model`` section of the job manifest.
+        sample_texts: Iterable of transcription / verse strings from the
+            downloaded dataset.  Only the first non-empty entry is used.
+
+    Returns:
+        The resolved boolean value for ``use_uroman``.
+    """
+    explicit = model_config.get('use_uroman')
+    if explicit is not None:
+        return bool(explicit)
+
+    # Auto-detect from the first non-empty text sample
+    for text in sample_texts:
+        stripped = text.strip() if text else ''
+        if stripped:
+            result = detect_use_uroman(stripped)
+            print(f"  Auto-detected use_uroman={result} from sample text: "
+                  f"{stripped[:80]}{'…' if len(stripped) > 80 else ''}")
+            return result
+
+    # No text available — default to False
+    return False
 
 
 # Default pretrained model coordinates for HuggingFace Hub

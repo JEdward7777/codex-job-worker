@@ -30,6 +30,7 @@ from handlers.base import (
     get_cell_reference,
     get_cell_id,
     download_pretrained_model,
+    resolve_use_uroman,
     STABLETTS_DEFAULT_REPO_ID,
     STABLETTS_DEFAULT_FILENAME,
 )
@@ -87,7 +88,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         base_checkpoint = model_config.get('base_checkpoint')
         reference_audio_path = model_config.get('reference_audio')
         language = model_config.get('language', 'english')
-        use_uroman = model_config.get('use_uroman', False)
+        # use_uroman is resolved after data download (may need auto-detection)
         uroman_lang = model_config.get('uroman_lang', None)
 
         # Get inference parameters
@@ -164,6 +165,10 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                 'success': False,
                 'error_message': "No training samples found. Check that cells have both audio and text."
             }
+
+        # Resolve use_uroman (auto-detect from text if not specified in manifest)
+        use_uroman = resolve_use_uroman(model_config, training_result.get('sample_texts', []))
+        print(f"  Use uroman: {use_uroman}")
 
         # Download inference data (cells needing audio)
         print("\nStep 1.2: Downloading inference data...")
@@ -626,6 +631,7 @@ def _download_training_data(
             'success': True,
             'metadata_csv': metadata_csv,
             'sample_count': len(samples),
+            'sample_texts': [s['transcription'] for s in samples],
             'error_message': None
         }
 
@@ -634,6 +640,7 @@ def _download_training_data(
             'success': False,
             'metadata_csv': None,
             'sample_count': 0,
+            'sample_texts': [],
             'error_message': f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
         }
 
