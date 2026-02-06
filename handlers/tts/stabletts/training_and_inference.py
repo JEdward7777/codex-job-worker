@@ -138,7 +138,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Download training data
         print("\nStep 1.1: Downloading training data...")
-        callbacks.heartbeat(message="Downloading training data")
+        callbacks.heartbeat(message="Downloading training data", stage="download")
 
         training_result = _download_training_data(
             job_context=job_context,
@@ -167,7 +167,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Download inference data (cells needing audio)
         print("\nStep 1.2: Downloading inference data...")
-        callbacks.heartbeat(message="Downloading inference data")
+        callbacks.heartbeat(message="Downloading inference data", stage="download")
 
         inference_result = _download_inference_data(
             job_context=job_context,
@@ -190,7 +190,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Download reference audio
         print("\nStep 1.3: Downloading reference audio...")
-        callbacks.heartbeat(message="Downloading reference audio")
+        callbacks.heartbeat(message="Downloading reference audio", stage="download")
 
         reference_dir = work_dir / "reference"
         reference_result = _download_file(
@@ -213,7 +213,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         pretrained_model = None
         if base_checkpoint:
             print("\nStep 1.4: Downloading base checkpoint from GitLab...")
-            callbacks.heartbeat(message="Downloading base checkpoint")
+            callbacks.heartbeat(message="Downloading base checkpoint", stage="download")
 
             checkpoint_result = _download_file(
                 job_context=job_context,
@@ -235,7 +235,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             # pretrained model from HuggingFace Hub. The model is cached locally so
             # subsequent jobs on the same worker won't re-download it.
             print("\nStep 1.4: Downloading default pretrained model from HuggingFace Hub...")
-            callbacks.heartbeat(message="Downloading pretrained model")
+            callbacks.heartbeat(message="Downloading pretrained model", stage="download")
 
             # Allow YAML manifest to override the default HuggingFace coordinates:
             #   model.pretrained_repo_id  (default: "KdaiP/StableTTS1.1")
@@ -263,7 +263,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Preprocess training data
         print("\nStep 2.1: Preprocessing training data...")
-        callbacks.heartbeat(message="Preprocessing data")
+        callbacks.heartbeat(message="Preprocessing data", stage="preprocess")
 
         feature_dir = work_dir / "features"
         output_json = feature_dir / "filelist.json"
@@ -278,7 +278,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             uroman_language=uroman_lang,
             resample=False,
             num_workers=2,
-            heartbeat_callback=lambda: callbacks.heartbeat(message="Preprocessing data")
+            heartbeat_callback=lambda: callbacks.heartbeat(message="Preprocessing data", stage="preprocess")
         )
 
         if not preprocess_result['success']:
@@ -291,13 +291,13 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Train the model
         print("\nStep 2.2: Training StableTTS model...")
-        callbacks.heartbeat(epochs_completed=0, message="Starting training")
+        callbacks.heartbeat(epochs_completed=0, message="Starting training", stage="training")
 
         checkpoint_dir = work_dir / "checkpoints"
         log_dir = work_dir / "logs"
 
         def training_heartbeat(epoch: int):
-            callbacks.heartbeat(epochs_completed=epoch, message=f"Training epoch {epoch}")
+            callbacks.heartbeat(epochs_completed=epoch, message=f"Training epoch {epoch}", stage="training")
 
         train_result = train_stabletts_api(
             train_dataset_path=str(output_json),
@@ -337,7 +337,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         else:
             print(f"\nStep 3.1: Running TTS inference on {inference_count} cells...")
             print("  (Using locally trained model - no download needed)")
-            callbacks.heartbeat(message="Running inference")
+            callbacks.heartbeat(message="Running inference", stage="inference")
 
             output_dir = work_dir / "output"
 
@@ -359,7 +359,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                 audio_format=audio_format,
                 resume=False,
                 overwrite=True,
-                heartbeat_callback=lambda: callbacks.heartbeat(message="Running inference")
+                heartbeat_callback=lambda: callbacks.heartbeat(message="Running inference", stage="inference")
             )
 
             if not inference_api_result['success']:
@@ -379,7 +379,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Upload checkpoint
         print("\nStep 4.1: Uploading trained checkpoint...")
-        callbacks.heartbeat(message="Uploading checkpoint")
+        callbacks.heartbeat(message="Uploading checkpoint", stage="upload")
 
         checkpoint_upload = _upload_checkpoint(
             job_context=job_context,
@@ -396,7 +396,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         # Upload audio files and update .codex files
         if inference_count > 0:
             print("\nStep 4.2: Uploading audio files and updating .codex files...")
-            callbacks.heartbeat(message="Uploading audio")
+            callbacks.heartbeat(message="Uploading audio", stage="upload")
 
             audio_upload = _upload_audio_and_update_codex(
                 job_context=job_context,
@@ -615,7 +615,7 @@ def _download_training_data(
                             'verse_id': pair['verse_id']
                         })
 
-            callbacks.heartbeat(message=f"Downloaded {len(samples)} training samples")
+            callbacks.heartbeat(message=f"Downloaded {len(samples)} training samples", stage="download")
 
         with open(metadata_csv, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=['file_name', 'transcription', 'verse_id'])
@@ -701,7 +701,7 @@ def _download_inference_data(
                     'codex_path': codex_path
                 })
 
-            callbacks.heartbeat(message=f"Found {len(samples)} cells needing audio")
+            callbacks.heartbeat(message=f"Found {len(samples)} cells needing audio", stage="download")
 
         with open(metadata_csv, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=['verse_id', 'cell_id', 'transcription', 'codex_path'])
@@ -879,7 +879,7 @@ def _upload_audio_and_update_codex(
         )
 
         # Upload all files in a single commit
-        callbacks.heartbeat(message=f"Uploading {len(files_to_upload)} files")
+        callbacks.heartbeat(message=f"Uploading {len(files_to_upload)} files", stage="upload")
         result = uploader.upload_batch(
             files=files_to_upload,
             commit_message=f"TTS inference results for job {job_id}"

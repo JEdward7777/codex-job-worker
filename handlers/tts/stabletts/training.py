@@ -90,7 +90,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Step 1: Download training data from GitLab
         print("Step 1: Downloading training data from GitLab...")
-        callbacks.heartbeat(message="Downloading training data")
+        callbacks.heartbeat(message="Downloading training data", stage="download")
 
         data_dir = work_dir / "data"
         audio_dir = data_dir / "audio"
@@ -126,7 +126,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Step 2: Preprocess data for StableTTS
         print("\nStep 2: Preprocessing data for StableTTS...")
-        callbacks.heartbeat(message="Preprocessing data")
+        callbacks.heartbeat(message="Preprocessing data", stage="preprocess")
 
         feature_dir = work_dir / "features"
         output_json = feature_dir / "filelist.json"
@@ -141,7 +141,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             uroman_language=uroman_lang,
             resample=False,
             num_workers=2,
-            heartbeat_callback=lambda: callbacks.heartbeat(message="Preprocessing data")
+            heartbeat_callback=lambda: callbacks.heartbeat(message="Preprocessing data", stage="preprocess")
         )
 
         if not preprocess_result['success']:
@@ -156,7 +156,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         pretrained_model = None
         if base_checkpoint:
             print("\nStep 3: Downloading base checkpoint from GitLab...")
-            callbacks.heartbeat(message="Downloading base checkpoint")
+            callbacks.heartbeat(message="Downloading base checkpoint", stage="download")
 
             checkpoint_result = _download_checkpoint(
                 job_context=job_context,
@@ -178,7 +178,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             # pretrained model from HuggingFace Hub. The model is cached locally so
             # subsequent jobs on the same worker won't re-download it.
             print("\nStep 3: Downloading default pretrained model from HuggingFace Hub...")
-            callbacks.heartbeat(message="Downloading pretrained model")
+            callbacks.heartbeat(message="Downloading pretrained model", stage="download")
 
             # Allow YAML manifest to override the default HuggingFace coordinates:
             #   model.pretrained_repo_id  (default: "KdaiP/StableTTS1.1")
@@ -199,14 +199,14 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Step 4: Train the model
         print("\nStep 4: Training StableTTS model...")
-        callbacks.heartbeat(epochs_completed=0, message="Starting training")
+        callbacks.heartbeat(epochs_completed=0, message="Starting training", stage="training")
 
         checkpoint_dir = work_dir / "checkpoints"
         log_dir = work_dir / "logs"
 
         def training_heartbeat(epoch: int):
             """Heartbeat callback for training progress."""
-            callbacks.heartbeat(epochs_completed=epoch, message=f"Training epoch {epoch}")
+            callbacks.heartbeat(epochs_completed=epoch, message=f"Training epoch {epoch}", stage="training")
 
         train_result = train_stabletts_api(
             train_dataset_path=str(output_json),
@@ -235,7 +235,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Step 5: Upload checkpoint to GitLab
         print("\nStep 5: Uploading checkpoint to GitLab...")
-        callbacks.heartbeat(message="Uploading checkpoint")
+        callbacks.heartbeat(message="Uploading checkpoint", stage="upload")
 
         upload_result = _upload_checkpoint(
             job_context=job_context,
@@ -418,7 +418,7 @@ def _download_training_data(
                             'verse_id': pair['verse_id']
                         })
 
-            callbacks.heartbeat(message=f"Downloaded {len(samples)} samples")
+            callbacks.heartbeat(message=f"Downloaded {len(samples)} samples", stage="download")
 
         # Write metadata CSV
         with open(metadata_csv, 'w', newline='', encoding='utf-8') as f:

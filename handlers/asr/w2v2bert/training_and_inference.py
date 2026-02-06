@@ -149,7 +149,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print("\n" + "=" * 60)
         print("PHASE 1: Preparing Training Data")
         print("=" * 60)
-        callbacks.heartbeat(message="Downloading training data")
+        callbacks.heartbeat(message="Downloading training data", stage="download")
 
         # Create downloader for audio file operations
         downloader = GitLabDatasetDownloader(
@@ -238,7 +238,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                     'verse_id': cell_ref
                 })
 
-            callbacks.heartbeat(message=f"Downloaded {len(training_samples)} training samples")
+            callbacks.heartbeat(message=f"Downloaded {len(training_samples)} training samples", stage="download")
 
         print(f"\n  Total training samples: {len(training_samples)}")
 
@@ -261,10 +261,10 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print("\n" + "=" * 60)
         print("PHASE 2: Training ASR Model")
         print("=" * 60)
-        callbacks.heartbeat(epochs_completed=0, message="Starting training")
+        callbacks.heartbeat(epochs_completed=0, message="Starting training", stage="training")
 
         def training_heartbeat(epoch: int):
-            callbacks.heartbeat(epochs_completed=epoch, message=f"Training epoch {epoch}")
+            callbacks.heartbeat(epochs_completed=epoch, message=f"Training epoch {epoch}", stage="training")
 
         train_result = train_w2v2bert_asr_api(
             csv_path=str(metadata_csv),
@@ -308,7 +308,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print("\n" + "=" * 60)
         print("PHASE 3: Loading Trained Model for Inference")
         print("=" * 60)
-        callbacks.heartbeat(message="Loading trained model")
+        callbacks.heartbeat(message="Loading trained model", stage="inference")
 
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -343,7 +343,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print("\n" + "=" * 60)
         print("PHASE 4: Transcribing Cells")
         print("=" * 60)
-        callbacks.heartbeat(message="Transcribing cells")
+        callbacks.heartbeat(message="Transcribing cells", stage="inference")
 
         total_transcribed = 0
         total_errors = 0
@@ -435,7 +435,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                 if (idx + 1) % 10 == 0:
                     callbacks.heartbeat(
                         message=f"Transcribed {total_transcribed} cells",
-                        cells_processed=total_transcribed
+                        stage="inference"
                     )
 
             if codex_modified:
@@ -453,7 +453,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print("\n" + "=" * 60)
         print("PHASE 5: Uploading Results")
         print("=" * 60)
-        callbacks.heartbeat(message="Uploading results")
+        callbacks.heartbeat(message="Uploading results", stage="upload")
 
         # Upload modified .codex files in a single commit
         if modified_codex_files:

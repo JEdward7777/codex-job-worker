@@ -109,7 +109,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Step 1: Download training data from GitLab
         print("Step 1: Downloading training data from GitLab...")
-        callbacks.heartbeat(message="Downloading training data")
+        callbacks.heartbeat(message="Downloading training data", stage="download")
 
         data_dir = work_dir / "data"
         audio_dir = data_dir / "audio"
@@ -147,7 +147,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         resume_checkpoint = None
         if base_checkpoint:
             print("\nStep 2: Downloading base checkpoint...")
-            callbacks.heartbeat(message="Downloading base checkpoint")
+            callbacks.heartbeat(message="Downloading base checkpoint", stage="download")
 
             checkpoint_result = _download_checkpoint(
                 job_context=job_context,
@@ -167,13 +167,13 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Step 3: Train the model
         print("\nStep 3: Training W2V2-BERT ASR model...")
-        callbacks.heartbeat(epochs_completed=0, message="Starting training")
+        callbacks.heartbeat(epochs_completed=0, message="Starting training", stage="training")
 
         output_dir = work_dir / "model_output"
 
         def training_heartbeat(epoch: int):
             """Heartbeat callback for training progress."""
-            callbacks.heartbeat(epochs_completed=epoch, message=f"Training epoch {epoch}")
+            callbacks.heartbeat(epochs_completed=epoch, message=f"Training epoch {epoch}", stage="training")
 
         train_result = train_w2v2bert_asr_api(
             csv_path=str(metadata_csv),
@@ -217,7 +217,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Step 4: Upload model to GitLab
         print("\nStep 4: Uploading model to GitLab...")
-        callbacks.heartbeat(message="Uploading model")
+        callbacks.heartbeat(message="Uploading model", stage="upload")
 
         upload_result = _upload_model(
             job_context=job_context,
@@ -376,7 +376,7 @@ def _download_training_data(
                     'verse_id': verse_id
                 })
 
-            callbacks.heartbeat(message=f"Downloaded {len(samples)} samples")
+            callbacks.heartbeat(message=f"Downloaded {len(samples)} samples", stage="download")
 
         # Write metadata CSV
         with open(metadata_csv, 'w', newline='', encoding='utf-8') as f:

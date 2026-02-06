@@ -79,23 +79,42 @@ class JobCallbacks:
         self.log_path = log_path
         self.project_id = job_context['project_id']
         self.job_id = job_context['job_id']
-        self._last_heartbeat = time.time()
+        self._last_heartbeat = 0  # Force first heartbeat to always push
+        self._last_stage = None
         self._epochs_completed = 0
 
-    def heartbeat(self, epochs_completed: Optional[int] = None, message: Optional[str] = None):
+    def heartbeat(self, epochs_completed: Optional[int] = None, message: Optional[str] = None, stage: Optional[str] = None):
         """
         Update response.yaml with timestamp and optional progress.
         Checks for cancellation - raises JobCanceledException if canceled.
 
+        Heartbeats are throttled to avoid excessive GitLab API calls:
+        - If ``stage`` changes (or is provided for the first time), the update
+          is pushed immediately so that task transitions are always visible.
+        - Otherwise the update is only pushed when at least
+          ``HEARTBEAT_INTERVAL`` seconds have elapsed since the last push.
+
         Args:
             epochs_completed: Optional progress indicator
-            message: Optional status message
+            message: Optional human-readable status message (may change freely)
+            stage: Optional static stage identifier (e.g. "download",
+                   "preprocess", "training", "upload").  A change in stage
+                   forces an immediate push.  Defaults to ``"default"`` when
+                   not provided, so existing callers are backward-compatible.
 
         Raises:
             JobCanceledException: If job is canceled or claimed by another worker
         """
         if epochs_completed is not None:
             self._epochs_completed = epochs_completed
+
+        effective_stage = stage or "default"
+        stage_changed = (effective_stage != self._last_stage)
+        time_elapsed = (time.time() - self._last_heartbeat) >= self.HEARTBEAT_INTERVAL
+
+        if not stage_changed and not time_elapsed:
+            # Throttled — skip the remote update
+            return
 
         # Check if job still exists and we still own it
         job_status = self.scanner.get_job_status(self.project_id, self.job_id)
@@ -118,6 +137,7 @@ class JobCallbacks:
         )
 
         self._last_heartbeat = time.time()
+        self._last_stage = effective_stage
 
     def check_heartbeat_needed(self):
         """Check if heartbeat is needed based on time elapsed."""

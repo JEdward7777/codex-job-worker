@@ -113,7 +113,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Step 1: Download model from GitLab
         print("Step 1: Downloading ASR model from GitLab...")
-        callbacks.heartbeat(message="Downloading ASR model")
+        callbacks.heartbeat(message="Downloading ASR model", stage="download")
 
         model_dir = work_dir / "model"
         model_result = _download_model(
@@ -136,7 +136,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         transmorgrifier = None
         if use_transmorgrifier and tm_model_path:
             print("\nStep 2: Loading SentenceTransmorgrifier...")
-            callbacks.heartbeat(message="Loading SentenceTransmorgrifier")
+            callbacks.heartbeat(message="Loading SentenceTransmorgrifier", stage="download")
 
             if not TRANSMORGRIFIER_AVAILABLE:
                 print("  Warning: SentenceTransmorgrifier not installed, skipping post-processing")
@@ -161,7 +161,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Step 3: Load ASR model
         print("\nStep 3: Loading ASR model...")
-        callbacks.heartbeat(message="Loading ASR model")
+        callbacks.heartbeat(message="Loading ASR model", stage="inference")
 
         import torch
         device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -176,7 +176,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Step 4: Download audio and process cells
         print("\nStep 4: Processing cells needing transcription...")
-        callbacks.heartbeat(message="Processing cells")
+        callbacks.heartbeat(message="Processing cells", stage="inference")
 
         data_dir = work_dir / "data"
         audio_dir = data_dir / "audio"
@@ -312,7 +312,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                 if (idx + 1) % 10 == 0:
                     callbacks.heartbeat(
                         message=f"Transcribed {total_transcribed} cells",
-                        cells_processed=total_transcribed
+                        stage="inference"
                     )
 
             # Save modified .codex file
@@ -329,7 +329,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         # Step 5: Upload modified .codex files in a single commit
         if modified_codex_files:
             print("\nStep 5: Uploading modified .codex files...")
-            callbacks.heartbeat(message="Uploading results")
+            callbacks.heartbeat(message="Uploading results", stage="upload")
 
             # Create uploader instance
             uploader = GitLabDatasetDownloader(
