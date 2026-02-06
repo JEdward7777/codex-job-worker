@@ -20,6 +20,7 @@ from io import BytesIO
 from contextlib import contextmanager
 import yaml
 import requests
+from requests.adapters import HTTPAdapter
 import fire
 
 from uroman import Uroman
@@ -149,6 +150,20 @@ class GitLabDatasetDownloader:
         else:
             self.headers = {}
 
+        # Create a requests.Session for HTTP connection reuse (keep-alive).
+        # This avoids repeated TCP + TLS handshakes when making many requests
+        # to the same GitLab server, significantly speeding up bulk downloads.
+        self.session = requests.Session()
+        self.session.headers.update(self.headers)
+
+        # Increase the connection pool size to support parallel downloads.
+        # The default urllib3 pool is 10 connections; we raise it to 20 so
+        # that up to 20 concurrent threads can each hold an open connection
+        # without blocking each other.
+        adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20)
+        self.session.mount('https://', adapter)
+        self.session.mount('http://', adapter)
+
         # Dataset configuration (optional - only needed for download operations)
         dataset_config = self.config.get('dataset', {})
         if dataset_config.get('output_dir'):
@@ -249,7 +264,7 @@ class GitLabDatasetDownloader:
 
         while True:
             params['page'] = page
-            response = requests.get(url, headers=self.headers, params=params)
+            response = self.session.get(url, params=params)
             response.raise_for_status()
 
             items = response.json()
@@ -308,7 +323,7 @@ class GitLabDatasetDownloader:
 
         try:
             # First attempt: regular download
-            response = requests.get(url, headers=self.headers, stream=True)
+            response = self.session.get(url, stream=True)
             response.raise_for_status()
 
             # Check if this is an LFS pointer file
@@ -346,7 +361,7 @@ class GitLabDatasetDownloader:
                     }
 
                     # Use HTTP Basic auth with token as password
-                    batch_response = requests.post(
+                    batch_response = self.session.post(
                         lfs_batch_url,
                         json=lfs_batch_payload,
                         headers=lfs_headers,
@@ -363,7 +378,7 @@ class GitLabDatasetDownloader:
                             download_headers = obj['actions']['download'].get('header', {})
 
                             # Download the actual LFS file to tmp, then rename
-                            lfs_response = requests.get(download_url, headers=download_headers, stream=True)
+                            lfs_response = self.session.get(download_url, headers=download_headers, stream=True)
                             lfs_response.raise_for_status()
 
                             with open(tmp_path, 'wb') as f:
@@ -933,7 +948,7 @@ class GitLabDatasetDownloader:
         """
         if not hasattr(self, '_cached_project_info'):
             url = f"{self.server_url}/api/v4/projects/{self.project_id_for_api}"
-            response = requests.get(url, headers=self.headers)
+            response = self.session.get(url)
             response.raise_for_status()
             self._cached_project_info = response.json()
         return self._cached_project_info
@@ -1023,7 +1038,7 @@ class GitLabDatasetDownloader:
         }
 
         # Request upload URLs
-        batch_response = requests.post(
+        batch_response = self.session.post(
             lfs_batch_url,
             json=lfs_batch_payload,
             headers=lfs_headers,
@@ -1073,7 +1088,7 @@ class GitLabDatasetDownloader:
                 # For path-based files, this opens the file directly
                 # For inline content, this returns a BytesIO wrapper
                 with content_opener() as file_obj:
-                    upload_response = requests.put(
+                    upload_response = self.session.put(
                         upload_url,
                         data=file_obj,
                         headers={**upload_headers, 'Content-Length': str(file_size)}
@@ -1122,7 +1137,7 @@ class GitLabDatasetDownloader:
             'actions': actions
         }
 
-        response = requests.post(url, headers=self.headers, json=payload)
+        response = self.session.post(url, json=payload)
         response.raise_for_status()
         return response.json()
 
@@ -1139,7 +1154,7 @@ class GitLabDatasetDownloader:
         url = f"{self.server_url}/api/v4/projects/{self.project_id_for_api}/repository/files/{quote(file_path, safe='')}"
         params = {'ref': branch}
 
-        response = requests.head(url, headers=self.headers, params=params)
+        response = self.session.head(url, params=params)
         return response.status_code == 200
 
     def upload_batch(

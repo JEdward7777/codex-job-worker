@@ -398,7 +398,7 @@ def _download_training_data(
                     print(f"    Warning: Could not download audio for {verse_id}")
                     return (pair, False)
 
-            max_workers = 5
+            max_workers = 15
             completed_count = 0
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {executor.submit(_download_one_pair, p): p for p in pairs}
