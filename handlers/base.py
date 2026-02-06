@@ -6,6 +6,7 @@ This module provides shared functionality used by all handlers.
 
 import os
 import sys
+import time
 import tarfile
 from io import BytesIO
 from pathlib import Path
@@ -368,3 +369,59 @@ def get_cells_with_audio_and_text(
         cell for cell in filtered
         if cell_has_audio(cell) and cell_has_text(cell)
     ]
+
+
+# Default pretrained model coordinates for HuggingFace Hub
+STABLETTS_DEFAULT_REPO_ID = "KdaiP/StableTTS1.1"
+STABLETTS_DEFAULT_FILENAME = "StableTTS/checkpoint_0.pt"
+
+
+def download_pretrained_model(
+    repo_id: str = STABLETTS_DEFAULT_REPO_ID,
+    filename: str = STABLETTS_DEFAULT_FILENAME,
+    max_retries: int = 3,
+) -> str:
+    """
+    Download a pretrained model from HuggingFace Hub with caching and retry logic.
+
+    Uses huggingface_hub's built-in caching mechanism (~/.cache/huggingface/hub/)
+    so the model is only downloaded once and shared across multiple jobs.
+
+    Args:
+        repo_id: HuggingFace repository ID (e.g., "KdaiP/StableTTS1.1")
+        filename: File path within the repository (e.g., "StableTTS/checkpoint_0.pt")
+        max_retries: Number of retry attempts with exponential backoff
+
+    Returns:
+        Local file path to the cached pretrained model
+
+    Raises:
+        RuntimeError: If download fails after all retries
+    """
+    from huggingface_hub import hf_hub_download  # pylint: disable=import-outside-toplevel
+
+    last_error = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            print(f"  Downloading pretrained model from HuggingFace Hub "
+                  f"(repo={repo_id}, file={filename}, attempt {attempt}/{max_retries})...")
+            local_path = hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+            )
+            print(f"  Pretrained model cached at: {local_path}")
+            return local_path
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                wait_time = 2 ** attempt  # Exponential backoff: 2s, 4s, 8s
+                print(f"  Download attempt {attempt} failed: {e}")
+                print(f"  Retrying in {wait_time} seconds...")
+                time.sleep(wait_time)
+            else:
+                print(f"  Download attempt {attempt} failed: {e}")
+
+    raise RuntimeError(
+        f"Failed to download pretrained model from HuggingFace Hub after {max_retries} attempts. "
+        f"repo_id={repo_id}, filename={filename}. Last error: {last_error}"
+    )

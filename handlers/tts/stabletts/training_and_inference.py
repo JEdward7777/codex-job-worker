@@ -28,6 +28,9 @@ from handlers.base import (
     get_cells_needing_audio,
     get_cell_reference,
     get_cell_id,
+    download_pretrained_model,
+    STABLETTS_DEFAULT_REPO_ID,
+    STABLETTS_DEFAULT_FILENAME,
 )
 from gitlab_to_hf_dataset import GitLabDatasetDownloader
 
@@ -105,7 +108,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print(f"  Epochs: {num_epochs}")
         print(f"  Batch size: {batch_size}")
         print(f"  Learning rate: {learning_rate}")
-        print(f"  Base checkpoint: {base_checkpoint or 'None (training from scratch)'}")
+        print(f"  Base checkpoint: {base_checkpoint or 'None (will use default pretrained model)'}")
         print()
         print("Inference Configuration:")
         print(f"  Reference audio: {reference_audio_path}")
@@ -205,10 +208,10 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         local_reference = reference_result['local_path']
         print(f"  Downloaded reference audio to: {local_reference}")
 
-        # Download base checkpoint if specified
+        # Download base checkpoint if specified, otherwise fetch default pretrained model
         pretrained_model = None
         if base_checkpoint:
-            print("\nStep 1.4: Downloading base checkpoint...")
+            print("\nStep 1.4: Downloading base checkpoint from GitLab...")
             callbacks.heartbeat(message="Downloading base checkpoint")
 
             checkpoint_result = _download_file(
@@ -223,7 +226,32 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                 print(f"  Downloaded checkpoint to: {pretrained_model}")
             else:
                 print(f"  Warning: Failed to download checkpoint: {checkpoint_result['error_message']}")
-                print("  Training will start from scratch.")
+                print("  Will fall back to default pretrained model from HuggingFace.")
+                base_checkpoint = None  # Fall through to default download below
+
+        if not base_checkpoint:
+            # No base checkpoint specified (or GitLab download failed) — download default
+            # pretrained model from HuggingFace Hub. The model is cached locally so
+            # subsequent jobs on the same worker won't re-download it.
+            print("\nStep 1.4: Downloading default pretrained model from HuggingFace Hub...")
+            callbacks.heartbeat(message="Downloading pretrained model")
+
+            # Allow YAML manifest to override the default HuggingFace coordinates:
+            #   model.pretrained_repo_id  (default: "KdaiP/StableTTS1.1")
+            #   model.pretrained_filename (default: "StableTTS/checkpoint_0.pt")
+            pretrained_repo_id = model_config.get('pretrained_repo_id', STABLETTS_DEFAULT_REPO_ID)
+            pretrained_filename = model_config.get('pretrained_filename', STABLETTS_DEFAULT_FILENAME)
+
+            try:
+                pretrained_model = download_pretrained_model(
+                    repo_id=pretrained_repo_id,
+                    filename=pretrained_filename,
+                )
+            except RuntimeError as e:
+                return {
+                    'success': False,
+                    'error_message': f"Failed to download pretrained model: {e}"
+                }
 
         # ============================================================
         # PHASE 2: Preprocess and Train

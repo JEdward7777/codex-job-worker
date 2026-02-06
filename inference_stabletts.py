@@ -187,7 +187,10 @@ class StableTTSInference:
         if not os.path.exists(vocoder_path):
             raise FileNotFoundError(
                 f"Vocoder not found at {vocoder_path}. "
-                "Please ensure StableTTS vocoders are properly installed."
+                "Please ensure StableTTS vocoders are properly installed. "
+                "The Vocos vocoder can be downloaded from: "
+                "https://huggingface.co/KdaiP/StableTTS1.1/resolve/main/vocoders/vocos.pt "
+                "(HF Hub coordinates: repo_id='KdaiP/StableTTS1.1', filename='vocoders/vocos.pt')"
             )
 
         print(f"Loading vocoder from: {vocoder_path}")

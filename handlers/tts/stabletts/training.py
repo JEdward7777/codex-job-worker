@@ -18,6 +18,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 # Import all dependencies at module load time to fail early
 from gitlab_to_hf_dataset import GitLabDatasetDownloader
+from handlers.base import (
+    download_pretrained_model,
+    STABLETTS_DEFAULT_REPO_ID,
+    STABLETTS_DEFAULT_FILENAME,
+)
 
 # Import training and preprocessing APIs
 from preprocess_stabletts import preprocess_stabletts_api
@@ -74,7 +79,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print(f"  Batch size: {batch_size}")
         print(f"  Learning rate: {learning_rate}")
         print(f"  Validation split: {val_split}")
-        print(f"  Base checkpoint: {base_checkpoint or 'None (training from scratch)'}")
+        print(f"  Base checkpoint: {base_checkpoint or 'None (will use default pretrained model)'}")
         print(f"  Use uroman: {use_uroman}")
         if include_verses:
             print(f"  Include verses: {len(include_verses)} specified")
@@ -146,10 +151,10 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         print(f"  Preprocessed {preprocess_result['processed_count']} / {preprocess_result['total_count']} samples")
 
-        # Step 3: Download base checkpoint if specified
+        # Step 3: Download base checkpoint if specified, otherwise fetch default pretrained model
         pretrained_model = None
         if base_checkpoint:
-            print("\nStep 3: Downloading base checkpoint...")
+            print("\nStep 3: Downloading base checkpoint from GitLab...")
             callbacks.heartbeat(message="Downloading base checkpoint")
 
             checkpoint_result = _download_checkpoint(
@@ -164,9 +169,32 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                 print(f"  Downloaded checkpoint to: {pretrained_model}")
             else:
                 print(f"  Warning: Failed to download checkpoint: {checkpoint_result['error_message']}")
-                print("  Training will start from scratch.")
-        else:
-            print("\nStep 3: No base checkpoint specified, training from scratch")
+                print("  Will fall back to default pretrained model from HuggingFace.")
+                base_checkpoint = None  # Fall through to default download below
+
+        if not base_checkpoint:
+            # No base checkpoint specified (or GitLab download failed) — download default
+            # pretrained model from HuggingFace Hub. The model is cached locally so
+            # subsequent jobs on the same worker won't re-download it.
+            print("\nStep 3: Downloading default pretrained model from HuggingFace Hub...")
+            callbacks.heartbeat(message="Downloading pretrained model")
+
+            # Allow YAML manifest to override the default HuggingFace coordinates:
+            #   model.pretrained_repo_id  (default: "KdaiP/StableTTS1.1")
+            #   model.pretrained_filename (default: "StableTTS/checkpoint_0.pt")
+            pretrained_repo_id = model_config.get('pretrained_repo_id', STABLETTS_DEFAULT_REPO_ID)
+            pretrained_filename = model_config.get('pretrained_filename', STABLETTS_DEFAULT_FILENAME)
+
+            try:
+                pretrained_model = download_pretrained_model(
+                    repo_id=pretrained_repo_id,
+                    filename=pretrained_filename,
+                )
+            except RuntimeError as e:
+                return {
+                    'success': False,
+                    'error_message': f"Failed to download pretrained model: {e}"
+                }
 
         # Step 4: Train the model
         print("\nStep 4: Training StableTTS model...")
