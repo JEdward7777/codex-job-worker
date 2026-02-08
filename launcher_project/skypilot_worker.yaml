@@ -24,10 +24,14 @@ resources:
   # Supported clouds: aws, gcp, azure, lambda, runpod, kubernetes, vast
   # Change this to your preferred cloud provider
   cloud: vast  # Vast.ai - often has the best GPU pricing
-  accelerators: RTX3060:1  # Adjust based on your needs
-  # For training, you may want more powerful GPUs:
+  #accelerators: "RTX3060:1"  # Adjust based on your needs
+  #RTX3060:1 kept giving us a TI varient with only 8GB.
+  #accelerators: "RTX4070:1"  #didn't match at all...
+  accelerators: "RTX3090:1"
+  # other more powerful options.
   # accelerators: A100:1
   # accelerators: V100:1
+
 
   # Optional: specify region for lower latency to GitLab server
   # region: us-east-1

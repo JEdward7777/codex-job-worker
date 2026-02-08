@@ -37,7 +37,10 @@ name: codex-force-job
 resources:
   # Supported clouds: aws, gcp, azure, lambda, runpod, kubernetes, vast
   cloud: vast  # Vast.ai - often has the best GPU pricing
-  accelerators: RTX3060:1  # Adjust based on your needs
+  #accelerators: "RTX3060:1"  # Adjust based on your needs
+  #RTX3060:1 kept giving us a TI varient with only 8GB.
+  #accelerators: "RTX4070:1"  #didn't match at all...
+  accelerators: "RTX3090:1"
 
 num_nodes: 1
 
