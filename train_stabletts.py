@@ -56,6 +56,13 @@ from utils.scheduler import get_cosine_schedule_with_warmup  #pylint: disable=im
 
 torch.backends.cudnn.benchmark = True
 
+
+class TrainingArgs:
+    """Simple namespace for training arguments. Defined at module level so it
+    can be pickled by ``torch.multiprocessing.spawn`` (spawn start method)."""
+    pass
+
+
 def setup(rank, world_size):
     """Initialize distributed training"""
     os.environ['MASTER_ADDR'] = 'localhost'
@@ -554,11 +561,8 @@ def train_stabletts_api(
         # Set heartbeat callback
         _heartbeat_callback = heartbeat_callback
 
-        # Create args namespace
-        class Args:
-            pass
-
-        args = Args()
+        # Create args namespace (TrainingArgs is at module level for pickling)
+        args = TrainingArgs()
         args.train_dataset_path = train_dataset_path
         args.model_save_path = model_save_path
         args.log_dir = log_dir
