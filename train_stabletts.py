@@ -572,9 +572,16 @@ def train_stabletts_api(
         args.val_split = val_split
         args.best_metric = best_metric
 
-        # Set thread limits
-        torch.set_num_threads(1)
-        torch.set_num_interop_threads(1)
+        # Set thread limits (guard against being called after parallel work
+        # has already started, e.g. when preprocess_stabletts ran a Pool first)
+        try:
+            torch.set_num_threads(1)
+        except RuntimeError:
+            pass
+        try:
+            torch.set_num_interop_threads(1)
+        except RuntimeError:
+            pass
 
         # Run training
         torch.multiprocessing.spawn(train, args=(world_size, args), nprocs=world_size)
