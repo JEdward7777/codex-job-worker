@@ -506,29 +506,34 @@ def _download_checkpoint(
     """
     Download a checkpoint from GitLab.
 
+    Uses GitLabDatasetDownloader.download_file() which automatically handles
+    Git LFS files (model checkpoints are typically stored via LFS).
+
     Returns:
         Dictionary with success, local_path, error_message
     """
     try:
-        project_id = job_context['project_id']
         scanner = callbacks.scanner
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Download checkpoint file
+        # Download checkpoint file using GitLabDatasetDownloader (handles LFS)
         checkpoint_filename = os.path.basename(checkpoint_path)
         local_path = output_dir / checkpoint_filename
 
-        checkpoint_content = scanner.get_file_content(project_id, checkpoint_path, binary=True)
-        if not checkpoint_content:
+        downloader = GitLabDatasetDownloader(
+            config_path=None,
+            gitlab_url=scanner.server_url,
+            access_token=scanner.access_token,
+            project_id=str(job_context['project_id']),
+        )
+
+        if not downloader.download_file(checkpoint_path, local_path):
             return {
                 'success': False,
                 'local_path': None,
                 'error_message': f"Could not download checkpoint from {checkpoint_path}"
             }
-
-        with open(local_path, 'wb') as f:
-            f.write(checkpoint_content)
 
         return {
             'success': True,

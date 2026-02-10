@@ -153,12 +153,15 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print("=" * 60)
         callbacks.heartbeat(message="Downloading training data", stage="download")
 
-        # Create downloader for audio file operations
+        # Create downloader for audio and codex file operations
         downloader = GitLabDatasetDownloader(
             config_path=None,
             gitlab_url=callbacks.scanner.server_url,
             access_token=callbacks.scanner.access_token,
             project_id=str(project_id),
+            config_overrides={
+                'dataset.output_dir': str(data_dir),
+            }
         )
 
         # List repository files and build audio files map to get correct file extensions
@@ -173,12 +176,10 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         for codex_path in codex_files:
             print(f"\n  Processing: {codex_path}")
 
-            codex_content = scanner.get_file_content(project_id, codex_path)
-            if not codex_content:
+            codex_data = downloader.download_json_file(codex_path)
+            if not codex_data:
                 print(f"    Warning: Could not download {codex_path}")
                 continue
-
-            codex_data = json.loads(codex_content)
             cells = codex_data.get('cells', [])
             all_codex_data[codex_path] = codex_data
 
@@ -540,24 +541,30 @@ def _download_transmorgrifier(
     tm_path: str,
     output_dir: Path
 ) -> Dict[str, Any]:
-    """Download SentenceTransmorgrifier model from GitLab."""
+    """Download SentenceTransmorgrifier model from GitLab.
+
+    Uses GitLabDatasetDownloader.download_file() which automatically handles
+    Git LFS files.
+    """
     try:
-        project_id = job_context['project_id']
         scanner = callbacks.scanner
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        content = scanner.get_file_content(project_id, tm_path, binary=True)
-        if not content:
+        downloader = GitLabDatasetDownloader(
+            config_path=None,
+            gitlab_url=scanner.server_url,
+            access_token=scanner.access_token,
+            project_id=str(job_context['project_id']),
+        )
+
+        local_path = output_dir / os.path.basename(tm_path)
+        if not downloader.download_file(tm_path, local_path):
             return {
                 'success': False,
                 'local_path': None,
                 'error_message': f"Could not download transmorgrifier from {tm_path}"
             }
-
-        local_path = output_dir / os.path.basename(tm_path)
-        with open(local_path, 'wb') as f:
-            f.write(content)
 
         return {
             'success': True,

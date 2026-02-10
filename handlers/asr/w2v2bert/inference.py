@@ -194,12 +194,15 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                 'error_message': "No codex_files specified in job configuration"
             }
 
-        # Create downloader for audio file operations
+        # Create downloader for audio and codex file operations
         downloader = GitLabDatasetDownloader(
             config_path=None,
             gitlab_url=callbacks.scanner.server_url,
             access_token=callbacks.scanner.access_token,
             project_id=str(project_id),
+            config_overrides={
+                'dataset.output_dir': str(data_dir),
+            }
         )
 
         # List repository files and build audio files map to get correct file extensions
@@ -214,13 +217,11 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         for codex_path in codex_files:
             print(f"\n  Processing: {codex_path}")
 
-            # Download .codex file
-            codex_content = scanner.get_file_content(project_id, codex_path)
-            if not codex_content:
+            # Download .codex file using downloader (which has output_dir set)
+            codex_data = downloader.download_json_file(codex_path)
+            if not codex_data:
                 print(f"    Warning: Could not download {codex_path}")
                 continue
-
-            codex_data = json.loads(codex_content)
             cells = codex_data.get('cells', [])
 
             # Find cells needing transcription (have audio but no text)
@@ -394,93 +395,54 @@ def _download_model(
     """
     Download ASR model from GitLab.
 
-    Supports both:
-    - .pth.tar archives (new format): Downloads and extracts the archive
-    - Directory format (legacy): Downloads individual model files
+    The model is expected to be a .pth.tar archive (created by create_tar_archive
+    during training upload). The file is downloaded via GitLabDatasetDownloader
+    which handles Git LFS transparently, then extracted.
 
     Returns:
         Dictionary with success, local_path, error_message
     """
     try:
-        project_id = job_context['project_id']
         scanner = callbacks.scanner
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Check if model_path is a .pth.tar archive
-        if model_path.endswith('.pth.tar') or model_path.endswith('.tar.gz') or model_path.endswith('.tar'):
-            print(f"    Downloading model archive: {model_path}")
-            content = scanner.get_file_content(project_id, model_path, binary=True)
-            if content:
-                # Extract the archive
-                print("    Extracting model archive...")
-                extract_tar_archive(content, output_dir)
-                return {
-                    'success': True,
-                    'local_path': str(output_dir),
-                    'error_message': None
-                }
-            else:
-                return {
-                    'success': False,
-                    'local_path': None,
-                    'error_message': f"Could not download model archive from {model_path}"
-                }
+        # Create downloader for file operations (handles LFS transparently)
+        downloader = GitLabDatasetDownloader(
+            config_path=None,
+            gitlab_url=scanner.server_url,
+            access_token=scanner.access_token,
+            project_id=str(job_context['project_id']),
+        )
 
-        # Legacy: Try to download as a directory of individual files
-        model_files = [
-            'config.json',
-            'vocab.json',
-            'preprocessor_config.json',
-            'tokenizer_config.json',
-            'special_tokens_map.json',
-            'model.safetensors',
-            'pytorch_model.bin',
-        ]
+        # Download the model archive
+        archive_filename = os.path.basename(model_path)
+        local_archive_path = output_dir / archive_filename
 
-        downloaded_any = False
-        for filename in model_files:
-            remote_path = f"{model_path}/{filename}"
-            local_path = output_dir / filename
-
-            content = scanner.get_file_content(project_id, remote_path, binary=True)
-            if content:
-                with open(local_path, 'wb') as f:
-                    f.write(content)
-                downloaded_any = True
-
-        if not downloaded_any:
-            # Try downloading as a single file (e.g., a .pth.tar without the extension in path)
-            content = scanner.get_file_content(project_id, model_path, binary=True)
-            if content:
-                # Check if it's actually a tar archive
-                if content[:2] == b'\x1f\x8b':  # gzip magic number
-                    print("    Detected gzip archive, extracting...")
-                    extract_tar_archive(content, output_dir)
-                    return {
-                        'success': True,
-                        'local_path': str(output_dir),
-                        'error_message': None
-                    }
-                else:
-                    local_path = output_dir / os.path.basename(model_path)
-                    with open(local_path, 'wb') as f:
-                        f.write(content)
-                    return {
-                        'success': True,
-                        'local_path': str(local_path),
-                        'error_message': None
-                    }
-
+        print(f"    Downloading model: {model_path}")
+        if not downloader.download_file(model_path, local_archive_path):
             return {
                 'success': False,
                 'local_path': None,
                 'error_message': f"Could not download model from {model_path}"
             }
 
+        # Check if it's a tar archive and extract it
+        if model_path.endswith(('.pth.tar', '.tar.gz', '.tar')):
+            print("    Extracting model archive...")
+            extract_tar_archive(str(local_archive_path), output_dir)
+            # Clean up the archive after extraction
+            local_archive_path.unlink(missing_ok=True)
+            return {
+                'success': True,
+                'local_path': str(output_dir),
+                'error_message': None
+            }
+
+        # Not an archive — return the downloaded file directly
         return {
             'success': True,
-            'local_path': str(output_dir),
+            'local_path': str(local_archive_path),
             'error_message': None
         }
 
@@ -501,27 +463,31 @@ def _download_transmorgrifier(
     """
     Download SentenceTransmorgrifier model from GitLab.
 
+    Uses GitLabDatasetDownloader.download_file() which automatically handles
+    Git LFS files.
+
     Returns:
         Dictionary with success, local_path, error_message
     """
     try:
-        project_id = job_context['project_id']
         scanner = callbacks.scanner
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Download the transmorgrifier model file
-        content = scanner.get_file_content(project_id, tm_path, binary=True)
-        if not content:
+        downloader = GitLabDatasetDownloader(
+            config_path=None,
+            gitlab_url=scanner.server_url,
+            access_token=scanner.access_token,
+            project_id=str(job_context['project_id']),
+        )
+
+        local_path = output_dir / os.path.basename(tm_path)
+        if not downloader.download_file(tm_path, local_path):
             return {
                 'success': False,
                 'local_path': None,
                 'error_message': f"Could not download transmorgrifier from {tm_path}"
             }
-
-        local_path = output_dir / os.path.basename(tm_path)
-        with open(local_path, 'wb') as f:
-            f.write(content)
 
         return {
             'success': True,

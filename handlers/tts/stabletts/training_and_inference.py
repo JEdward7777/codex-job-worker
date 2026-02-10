@@ -454,9 +454,12 @@ def _download_file(
     remote_path: str,
     output_dir: Path
 ) -> Dict[str, Any]:
-    """Download a file from GitLab."""
+    """Download a file from GitLab.
+
+    Uses GitLabDatasetDownloader.download_file() which automatically handles
+    Git LFS files (model checkpoints and audio are typically stored via LFS).
+    """
     try:
-        project_id = job_context['project_id']
         scanner = callbacks.scanner
 
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -464,16 +467,19 @@ def _download_file(
         filename = os.path.basename(remote_path)
         local_path = output_dir / filename
 
-        file_content = scanner.get_file_content(project_id, remote_path, binary=True)
-        if not file_content:
+        downloader = GitLabDatasetDownloader(
+            config_path=None,
+            gitlab_url=scanner.server_url,
+            access_token=scanner.access_token,
+            project_id=str(job_context['project_id']),
+        )
+
+        if not downloader.download_file(remote_path, local_path):
             return {
                 'success': False,
                 'local_path': None,
                 'error_message': f"Could not download file from {remote_path}"
             }
-
-        with open(local_path, 'wb') as f:
-            f.write(file_content)
 
         return {
             'success': True,
@@ -672,6 +678,17 @@ def _download_inference_data(
                 'error_message': "No codex_files specified in job configuration"
             }
 
+        # Create downloader for file operations (handles LFS transparently)
+        downloader = GitLabDatasetDownloader(
+            config_path=None,
+            gitlab_url=scanner.server_url,
+            access_token=scanner.access_token,
+            project_id=str(project_id),
+            config_overrides={
+                'dataset.output_dir': str(output_dir),
+            }
+        )
+
         metadata_csv = output_dir / "inference_metadata.csv"
         samples = []
         codex_data = {}
@@ -679,12 +696,10 @@ def _download_inference_data(
         for codex_path in codex_files:
             print(f"    Processing: {codex_path}")
 
-            codex_content = scanner.get_file_content(project_id, codex_path)
-            if not codex_content:
+            codex_json = downloader.download_json_file(codex_path)
+            if not codex_json:
                 print(f"      Warning: Could not download {codex_path}")
                 continue
-
-            codex_json = json.loads(codex_content)
             codex_data[codex_path] = codex_json
             cells = codex_json.get('cells', [])
 

@@ -410,37 +410,54 @@ def _download_checkpoint(
     """
     Download a checkpoint from GitLab.
 
+    The checkpoint is expected to be a .pth.tar archive (created by
+    create_tar_archive during training upload). Uses GitLabDatasetDownloader
+    which handles Git LFS transparently, then extracts the archive.
+
     Returns:
         Dictionary with success, local_path, error_message
     """
     try:
-        project_id = job_context['project_id']
         scanner = callbacks.scanner
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # For ASR models, the checkpoint is typically a directory
-        # We need to download all files in the checkpoint directory
+        # Create downloader for file operations (handles LFS transparently)
+        downloader = GitLabDatasetDownloader(
+            config_path=None,
+            gitlab_url=scanner.server_url,
+            access_token=scanner.access_token,
+            project_id=str(job_context['project_id']),
+        )
+
         checkpoint_filename = os.path.basename(checkpoint_path)
         local_path = output_dir / checkpoint_filename
 
-        # Try to download as a single file first
-        checkpoint_content = scanner.get_file_content(project_id, checkpoint_path, binary=True)
-        if checkpoint_content:
-            with open(local_path, 'wb') as f:
-                f.write(checkpoint_content)
+        print(f"    Downloading checkpoint: {checkpoint_path}")
+        if not downloader.download_file(checkpoint_path, local_path):
+            return {
+                'success': False,
+                'local_path': None,
+                'error_message': f"Could not download checkpoint from {checkpoint_path}"
+            }
+
+        # Check if it's a tar archive and extract it
+        if checkpoint_path.endswith(('.pth.tar', '.tar.gz', '.tar')):
+            from handlers.base import extract_tar_archive
+            print("    Extracting checkpoint archive...")
+            extract_tar_archive(str(local_path), output_dir)
+            # Clean up the archive after extraction
+            local_path.unlink(missing_ok=True)
             return {
                 'success': True,
-                'local_path': str(local_path),
+                'local_path': str(output_dir),
                 'error_message': None
             }
 
-        # If that fails, it might be a directory - try to list and download
-        # TODO: Implement directory download for HuggingFace model format
         return {
-            'success': False,
-            'local_path': None,
-            'error_message': f"Could not download checkpoint from {checkpoint_path}"
+            'success': True,
+            'local_path': str(local_path),
+            'error_message': None
         }
 
     except Exception as e:
