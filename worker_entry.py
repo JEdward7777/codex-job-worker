@@ -458,6 +458,12 @@ def process_job(
             # Remove internal fields, keep metrics and paths
             result_data = {k: v for k, v in result.items()
                           if k not in ('success', 'error_message') and v is not None}
+            # Move epochs_completed from result to root level so it isn't
+            # duplicated.  Handlers return it in their result dict; we pop it
+            # here and update the callbacks tracker so that mark_complete()
+            # writes the correct final value at the root of response.yaml.
+            if 'epochs_completed' in result_data:
+                callbacks._epochs_completed = result_data.pop('epochs_completed')
             callbacks.mark_complete(result_data=result_data if result_data else None)
             success = True
         else:

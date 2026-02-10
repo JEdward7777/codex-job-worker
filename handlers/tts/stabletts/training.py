@@ -53,16 +53,20 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
     try:
         # Extract job configuration
-        job_config = job_context.get('job_config', {})
+        # The manifest places most fields at the top level of the job dict.
+        # Some handlers previously looked under invented nested keys like
+        # 'job_config.training'; we now read from the canonical locations
+        # defined in the manifest spec (INITIAL_BUILD_INSTRUCTIONS.md).
         model_config = job_context.get('model', {})
-        training_config = job_config.get('training', {})
+        training_config = job_context.get('training', {})
 
         # Get training parameters with defaults
-        num_epochs = training_config.get('epochs', 100)
-        batch_size = training_config.get('batch_size', 32)
-        learning_rate = training_config.get('learning_rate', 1e-4)
-        val_split = training_config.get('val_split', 0.1)
-        save_interval = training_config.get('save_interval', 10)
+        # 'epochs' is a top-level manifest field per the spec.
+        num_epochs = job_context.get('epochs', 100)
+        batch_size = job_context.get('batch_size', 32)
+        learning_rate = job_context.get('learning_rate', 1e-4)
+        val_split = job_context.get('val_split', 0.1)
+        save_interval = job_context.get('save_interval', 10)
 
         # Get model parameters
         model_type = model_config.get('type', 'StableTTS')
@@ -71,9 +75,9 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         # use_uroman is resolved after data download (may need auto-detection)
         uroman_lang = model_config.get('uroman_lang', None)
 
-        # Get filter configuration
-        include_verses = job_config.get('include_verses', [])
-        exclude_verses = job_config.get('exclude_verses', [])
+        # Get filter configuration (per spec, training filters live under 'training')
+        include_verses = training_config.get('include_verses', [])
+        exclude_verses = training_config.get('exclude_verses', [])
 
         print("\nTraining Configuration:")
         print(f"  Model type: {model_type}")

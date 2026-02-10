@@ -66,15 +66,15 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
     try:
         # Extract job configuration
-        job_config = job_context.get('job_config', {})
+        # The manifest places most fields at the top level of the job dict.
         model_config = job_context.get('model', {})
-        inference_config = job_config.get('inference', {})
+        inference_config = job_context.get('inference', {})
 
         # Get model path - either from job output or specified path
         model_path = model_config.get('checkpoint_path')
         if not model_path:
             # Check if there's a trained model from a previous training job
-            model_path = job_config.get('trained_model_path')
+            model_path = job_context.get('trained_model_path')
 
         if not model_path:
             return {
@@ -85,16 +85,16 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         # Get model parameters
         use_wav2vec2_base = model_config.get('use_wav2vec2_base')
 
-        # Get SentenceTransmorgrifier config
+        # Get SentenceTransmorgrifier config (handler-specific)
         # Defaults to enabled if model_path is provided, can be explicitly disabled
-        tm_config = job_config.get('transmorgrifier', {})
+        tm_config = job_context.get('transmorgrifier', {})
         tm_model_path = tm_config.get('model_path')
         # Default: enabled=True if model_path exists, but can be explicitly set to False
         use_transmorgrifier = tm_config.get('enabled', True) and tm_model_path is not None
 
-        # Get filter configuration
-        include_verses = job_config.get('include_verses', [])
-        exclude_verses = job_config.get('exclude_verses', [])
+        # Get filter configuration (per spec, inference filters under 'inference')
+        include_verses = inference_config.get('include_verses', [])
+        exclude_verses = inference_config.get('exclude_verses', [])
 
         # UNK token handling
         suppress_unk = inference_config.get('suppress_unk', True)
@@ -186,8 +186,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         # Process each .codex file
         project_id = job_context['project_id']
         scanner = callbacks.scanner
-        job_config = job_context.get('job_config', {})
-        codex_files = job_config.get('codex_files', [])
+        codex_files = job_context.get('codex_files', [])
 
         if not codex_files:
             return {

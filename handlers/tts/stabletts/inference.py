@@ -55,14 +55,14 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
     try:
         # Extract job configuration
-        job_config = job_context.get('job_config', {})
+        # The manifest places most fields at the top level of the job dict.
         model_config = job_context.get('model', {})
-        inference_config = job_config.get('inference', {})
+        inference_config = job_context.get('inference', {})
 
         # Get model parameters
         model_type = model_config.get('type', 'StableTTS')
         checkpoint_path = model_config.get('checkpoint')
-        reference_audio_path = model_config.get('reference_audio')
+        reference_audio_path = model_config.get('reference_audio') or job_context.get('voice_reference')
         language = model_config.get('language', 'english')
         # use_uroman is resolved after data download (may need auto-detection)
         uroman_lang = model_config.get('uroman_lang', None)
@@ -74,9 +74,9 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         cfg_scale = inference_config.get('cfg_scale', 3.0)
         audio_format = inference_config.get('audio_format', 'webm')
 
-        # Get filter configuration
-        include_verses = job_config.get('include_verses', [])
-        exclude_verses = job_config.get('exclude_verses', [])
+        # Get filter configuration (per spec, inference filters under 'inference')
+        include_verses = inference_config.get('include_verses', [])
+        exclude_verses = inference_config.get('exclude_verses', [])
 
         print("\nInference Configuration:")
         print(f"  Model type: {model_type}")
@@ -328,8 +328,7 @@ def _download_inference_data(
         project_id = job_context['project_id']
         scanner = callbacks.scanner
 
-        job_config = job_context.get('job_config', {})
-        codex_files = job_config.get('codex_files', [])
+        codex_files = job_context.get('codex_files', [])
 
         if not codex_files:
             return {

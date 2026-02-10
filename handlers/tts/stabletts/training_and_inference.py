@@ -71,27 +71,28 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
     try:
         # Extract job configuration
-        job_config = job_context.get('job_config', {})
+        # The manifest places most fields at the top level of the job dict.
+        # 'inference' is a sub-object per the manifest spec.
         model_config = job_context.get('model', {})
-        training_config = job_config.get('training', {})
-        inference_config = job_config.get('inference', {})
+        inference_config = job_context.get('inference', {})
 
         # Get training parameters with defaults
-        num_epochs = training_config.get('epochs', 100)
-        batch_size = training_config.get('batch_size', 32)
-        learning_rate = training_config.get('learning_rate', 1e-4)
-        val_split = training_config.get('val_split', 0.1)
-        save_interval = training_config.get('save_interval', 10)
+        # 'epochs' is a top-level manifest field per the spec.
+        num_epochs = job_context.get('epochs', 100)
+        batch_size = job_context.get('batch_size', 32)
+        learning_rate = job_context.get('learning_rate', 1e-4)
+        val_split = job_context.get('val_split', 0.1)
+        save_interval = job_context.get('save_interval', 10)
 
         # Get model parameters
         model_type = model_config.get('type', 'StableTTS')
         base_checkpoint = model_config.get('base_checkpoint')
-        reference_audio_path = model_config.get('reference_audio')
+        reference_audio_path = model_config.get('reference_audio') or job_context.get('voice_reference')
         language = model_config.get('language', 'english')
         # use_uroman is resolved after data download (may need auto-detection)
         uroman_lang = model_config.get('uroman_lang', None)
 
-        # Get inference parameters
+        # Get inference parameters (handler-specific, not in manifest spec)
         diffusion_steps = inference_config.get('diffusion_steps', 10)
         temperature = inference_config.get('temperature', 1.0)
         length_scale = inference_config.get('length_scale', 1.0)
@@ -99,6 +100,8 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         audio_format = inference_config.get('audio_format', 'webm')
 
         # Get filter configuration
+        # Per spec, training filters live under 'training', inference under 'inference'.
+        training_config = job_context.get('training', {})
         training_include = training_config.get('include_verses', [])
         training_exclude = training_config.get('exclude_verses', [])
         inference_include = inference_config.get('include_verses', [])

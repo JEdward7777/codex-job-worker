@@ -50,22 +50,23 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
     try:
         # Extract job configuration
-        job_config = job_context.get('job_config', {})
+        # The manifest places most fields at the top level of the job dict.
         model_config = job_context.get('model', {})
-        training_config = job_config.get('training', {})
+        training_config = job_context.get('training', {})
 
         # Get training parameters with defaults
-        num_epochs = training_config.get('epochs', 5)
-        batch_size = training_config.get('batch_size', 8)
-        learning_rate = training_config.get('learning_rate', 3e-4)
-        gradient_accumulation_steps = training_config.get('gradient_accumulation_steps', 2)
-        warmup_steps = training_config.get('warmup_steps', 500)
-        save_steps = training_config.get('save_steps', 500)
-        eval_steps = training_config.get('eval_steps', 500)
-        val_split = training_config.get('val_split', 0.1)
-        test_split = training_config.get('test_split', 0.1)
-        max_duration_seconds = training_config.get('max_duration_seconds')
-        use_8bit_optimizer = training_config.get('use_8bit_optimizer', False)
+        # 'epochs' is a top-level manifest field per the spec.
+        num_epochs = job_context.get('epochs', 5)
+        batch_size = job_context.get('batch_size', 8)
+        learning_rate = job_context.get('learning_rate', 3e-4)
+        gradient_accumulation_steps = job_context.get('gradient_accumulation_steps', 2)
+        warmup_steps = job_context.get('warmup_steps', 500)
+        save_steps = job_context.get('save_steps', 500)
+        eval_steps = job_context.get('eval_steps', 500)
+        val_split = job_context.get('val_split', 0.1)
+        test_split = job_context.get('test_split', 0.1)
+        max_duration_seconds = job_context.get('max_duration_seconds')
+        use_8bit_optimizer = job_context.get('use_8bit_optimizer', False)
 
         # Get model parameters
         base_model = model_config.get('base_model', 'facebook/w2v-bert-2.0')
@@ -77,15 +78,15 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         if use_wav2vec2_base is None:
             use_wav2vec2_base = 'bert' not in base_model.lower()
 
-        # Text normalization options
-        text_config = job_config.get('text_normalization', {})
+        # Text normalization options (handler-specific, not in manifest spec)
+        text_config = job_context.get('text_normalization', {})
         lowercase = text_config.get('lowercase', True)
         remove_punctuation = text_config.get('remove_punctuation', True)
         remove_numbers = text_config.get('remove_numbers', False)
 
-        # Get filter configuration
-        include_verses = job_config.get('include_verses', [])
-        exclude_verses = job_config.get('exclude_verses', [])
+        # Get filter configuration (per spec, training filters live under 'training')
+        include_verses = training_config.get('include_verses', [])
+        exclude_verses = training_config.get('exclude_verses', [])
 
         model_arch = "Wav2Vec2" if use_wav2vec2_base else "Wav2Vec2-BERT"
         print("\nTraining Configuration:")
