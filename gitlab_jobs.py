@@ -17,6 +17,7 @@ Usage:
 """
 
 import os
+import random
 import sys
 import time
 from datetime import datetime, timezone
@@ -844,12 +845,14 @@ class GitLabJobScanner:
         worker_id: str
     ) -> Dict[str, Any]:
         """
-        Attempt to claim the first available job.
+        Attempt to claim the next available job, prioritized by submission time.
 
         This method:
         1. Gets list of available jobs
-        2. Iterates through them attempting to claim each
-        3. Returns the first successfully claimed job (verified)
+        2. Sorts them by submitted_at (oldest first) for fair FIFO ordering.
+           Jobs without submitted_at are shuffled randomly and placed at the back.
+        3. Iterates through them attempting to claim each
+        4. Returns the first successfully claimed job (verified)
 
         Args:
             worker_id: Unique identifier for this worker
@@ -867,6 +870,13 @@ class GitLabJobScanner:
         """
         self._log("Fetching available jobs...")
         available_jobs = self.list_available_jobs()
+
+        # Fair job ordering: FIFO by submitted_at (oldest first).
+        # Jobs without submitted_at get a high default so they sort to the back.
+        # Shuffle first so jobs with the same (or missing) timestamp get random order
+        # (Python's sort is stable, so equal keys preserve the shuffled order).
+        random.shuffle(available_jobs)
+        available_jobs.sort(key=lambda j: j.get('submitted_at', '9999-12-31T23:59:59Z'))
 
         if not available_jobs:
             raise NoJobsAvailableError("No jobs available to claim")
