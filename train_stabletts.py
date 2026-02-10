@@ -57,6 +57,42 @@ from utils.scheduler import get_cosine_schedule_with_warmup  #pylint: disable=im
 torch.backends.cudnn.benchmark = True
 
 
+class _TeeWriter:
+    """Write to both a file and the original stream. Used by child processes
+    spawned via ``torch.multiprocessing.spawn`` to tee their stdout/stderr
+    into the same log file that the parent process writes to."""
+
+    def __init__(self, log_file, original_stream):
+        self._log_file = log_file
+        self._original = original_stream
+
+    def write(self, message):
+        self._log_file.write(message)
+        self._log_file.flush()
+        self._original.write(message)
+        self._original.flush()
+
+    def flush(self):
+        self._log_file.flush()
+        self._original.flush()
+
+
+def periodic_progress(iterable, total=None, desc="", interval=100):
+    """Drop-in replacement for ``tqdm`` that prints a status line every
+    *interval* items instead of a continuous progress bar.  Useful when
+    stdout is captured to a log file where progress-bar control characters
+    create noise."""
+    last = 0
+    for i, item in enumerate(iterable):
+        if i % interval == 0:
+            total_str = f"/{total}" if total else ""
+            print(f"  {desc}: {i}{total_str}")
+        last = i
+        yield item
+    total_str = f"/{total}" if total else ""
+    print(f"  {desc}: done ({last + 1}{total_str})")
+
+
 class TrainingArgs:
     """Simple namespace for training arguments. Defined at module level so it
     can be pickled by ``torch.multiprocessing.spawn`` (spawn start method)."""
@@ -237,13 +273,29 @@ def validate(model: DDP, val_dataloader: DataLoader, _rank: int, device: int) ->
         else:
             return 0.0, 0.0, 0.0, 0.0
 
-# Global variable for heartbeat callback (needed for multiprocessing)
+# Global variables for multiprocessing (set before spawn, read by child)
 _heartbeat_callback: Optional[Callable[[int], None]] = None
+_use_tqdm: bool = True
 
 
 def train(rank, world_size, args):
     """Main training function"""
-    # Note: _heartbeat_callback is read-only here, set by train_stabletts_api()
+    # Note: _heartbeat_callback and _use_tqdm are read-only here,
+    # set by train_stabletts_api() before spawn.
+
+    # --- Tee stdout/stderr to the log file (if provided) ---
+    # torch.multiprocessing.spawn creates a new process, so the parent's
+    # TeeLogger does not capture output here.  Re-open the same log file
+    # in append mode so training prints appear in the log.
+    _log_file_handle = None
+    if rank == 0 and getattr(args, 'log_file_path', None):
+        try:
+            _log_file_handle = open(args.log_file_path, 'a', encoding='utf-8')
+            sys.stdout = _TeeWriter(_log_file_handle, sys.__stdout__)
+            sys.stderr = _TeeWriter(_log_file_handle, sys.__stderr__)
+        except Exception as e:
+            print(f"Warning: could not tee to log file: {e}", file=sys.__stderr__)
+
     setup(rank, world_size)
     torch.cuda.set_device(rank)
 
@@ -368,18 +420,37 @@ def train(rank, world_size, args):
 
     # Track best validation loss
     best_val_metric = float('inf')
+    best_epoch = -1
+
+    # Per-epoch metrics (written to a JSON file so the parent process can read them)
+    metrics_path = os.path.join(args.model_save_path, '_epoch_metrics.json') if rank == 0 else None
+    epoch_metrics_list = []
 
     # Training loop
     model.train()
     for epoch in range(current_epoch, args.num_epochs):
         train_dataloader.batch_sampler.set_epoch(epoch)
 
+        # Choose progress wrapper based on _use_tqdm flag
         if rank == 0:
-            dataloader = tqdm(train_dataloader, desc=f"Epoch {epoch}/{args.num_epochs}")
+            if _use_tqdm:
+                dataloader = tqdm(train_dataloader, desc=f"Epoch {epoch}/{args.num_epochs}")
+            else:
+                num_batches = len(train_dataloader)
+                dataloader = periodic_progress(
+                    train_dataloader, total=num_batches,
+                    desc=f"Epoch {epoch}/{args.num_epochs}", interval=max(1, num_batches // 4)
+                )
         else:
             dataloader = train_dataloader
 
-        # Training phase
+        # Training phase — accumulate losses for per-epoch summary
+        epoch_train_total = 0.0
+        epoch_train_diff = 0.0
+        epoch_train_dur = 0.0
+        epoch_train_prior = 0.0
+        epoch_num_batches = 0
+
         for batch_idx, datas in enumerate(dataloader):
             datas = [data.to(rank, non_blocking=True) for data in datas]
             x, x_lengths, y, y_lengths, z, z_lengths = datas
@@ -391,17 +462,35 @@ def train(rank, world_size, args):
             optimizer.step()
             scheduler.step()
 
-            # Log training metrics
+            # Accumulate for epoch average
+            if rank == 0:
+                epoch_train_total += loss.item()
+                epoch_train_diff += diff_loss.item()
+                epoch_train_dur += dur_loss.item()
+                epoch_train_prior += prior_loss.item()
+                epoch_num_batches += 1
+
+            # Log training metrics to TensorBoard
             if writer is not None:
                 if rank == 0 and batch_idx % args.log_interval == 0:
-                    steps = epoch * len(dataloader) + batch_idx
+                    steps = epoch * len(train_dataloader) + batch_idx
                     writer.add_scalar("training/diff_loss", diff_loss.item(), steps)
                     writer.add_scalar("training/dur_loss", dur_loss.item(), steps)
                     writer.add_scalar("training/prior_loss", prior_loss.item(), steps)
                     writer.add_scalar("training/total_loss", loss.item(), steps)
                     writer.add_scalar("learning_rate/learning_rate", scheduler.get_last_lr()[0], steps)
 
+        # Compute epoch-average training losses
+        if rank == 0 and epoch_num_batches > 0:
+            avg_train_total = epoch_train_total / epoch_num_batches
+            avg_train_diff = epoch_train_diff / epoch_num_batches
+            avg_train_dur = epoch_train_dur / epoch_num_batches
+            avg_train_prior = epoch_train_prior / epoch_num_batches
+        else:
+            avg_train_total = avg_train_diff = avg_train_dur = avg_train_prior = 0.0
+
         # Validation phase
+        val_total_loss = val_diff_loss = val_dur_loss = val_prior_loss = 0.0
         if rank == 0 and len(val_dataset) > 0:
             val_dur_loss, val_diff_loss, val_prior_loss, val_total_loss = validate(
                 model, val_dataloader, rank, rank
@@ -414,12 +503,6 @@ def train(rank, world_size, args):
                 writer.add_scalar("validation/prior_loss", val_prior_loss, epoch)
                 writer.add_scalar("validation/total_loss", val_total_loss, epoch)
 
-            print(f"\nEpoch {epoch} Validation - "
-                  f"Total: {val_total_loss:.4f}, "
-                  f"Diff: {val_diff_loss:.4f}, "
-                  f"Dur: {val_dur_loss:.4f}, "
-                  f"Prior: {val_prior_loss:.4f}")
-
             # Check if this is the best model based on selected metric
             metric_map = {
                 'total_loss': val_total_loss,
@@ -431,11 +514,36 @@ def train(rank, world_size, args):
 
             if current_metric < best_val_metric:
                 best_val_metric = current_metric
+                best_epoch = epoch
                 best_model_path = os.path.join(args.model_save_path, 'best_model.pt')
                 best_optimizer_path = os.path.join(args.model_save_path, 'best_optimizer.pt')
                 torch.save(model.module.state_dict(), best_model_path)
                 torch.save(optimizer.state_dict(), best_optimizer_path)
-                print(f"  → New best model saved! ({args.best_metric}: {current_metric:.4f})")
+
+        # Per-epoch summary line (always printed, regardless of tqdm setting)
+        if rank == 0:
+            lr = scheduler.get_last_lr()[0]
+            best_marker = " ★" if best_epoch == epoch else ""
+            print(
+                f"Epoch {epoch}/{args.num_epochs} - "
+                f"Train: {avg_train_total:.4f} (diff={avg_train_diff:.4f}, dur={avg_train_dur:.4f}, prior={avg_train_prior:.4f}) | "
+                f"Val: {val_total_loss:.4f} (diff={val_diff_loss:.4f}, dur={val_dur_loss:.4f}, prior={val_prior_loss:.4f}) | "
+                f"Best: epoch {best_epoch} ({best_val_metric:.4f}) | "
+                f"LR: {lr:.2e}{best_marker}"
+            )
+
+            # Collect metrics for later retrieval
+            epoch_metrics_list.append({
+                'epoch': epoch,
+                'train_total_loss': round(avg_train_total, 6),
+                'train_diff_loss': round(avg_train_diff, 6),
+                'train_dur_loss': round(avg_train_dur, 6),
+                'train_prior_loss': round(avg_train_prior, 6),
+                'val_total_loss': round(val_total_loss, 6),
+                'val_diff_loss': round(val_diff_loss, 6),
+                'val_dur_loss': round(val_dur_loss, 6),
+                'val_prior_loss': round(val_prior_loss, 6),
+            })
 
         # Save regular checkpoints
         if rank == 0 and epoch % args.save_interval == 0:
@@ -443,7 +551,7 @@ def train(rank, world_size, args):
             optimizer_path = os.path.join(args.model_save_path, f'optimizer_{epoch}.pt')
             torch.save(model.module.state_dict(), checkpoint_path)
             torch.save(optimizer.state_dict(), optimizer_path)
-            print(f"Checkpoint saved at epoch {epoch}")
+            print(f"  Checkpoint saved at epoch {epoch}")
 
         # Call heartbeat callback after each epoch (only on rank 0)
         if rank == 0:
@@ -457,9 +565,27 @@ def train(rank, world_size, args):
                 raise
 
     if rank == 0:
+        # Write epoch metrics to JSON so the parent process can read them
+        if metrics_path and epoch_metrics_list:
+            with open(metrics_path, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'epoch_metrics': epoch_metrics_list,
+                    'best_epoch': best_epoch,
+                    'best_val_metric': round(best_val_metric, 6),
+                    'best_metric_name': args.best_metric,
+                }, f, indent=2)
+
         if writer is not None:
             writer.close()
-        print("\nTraining completed!")
+
+        print(f"\nTraining completed! Best model from epoch {best_epoch} "
+              f"({args.best_metric}: {best_val_metric:.4f})")
+
+    # Close log file tee if we opened one
+    if _log_file_handle is not None:
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+        _log_file_handle.close()
 
     cleanup()
 
@@ -477,7 +603,9 @@ def train_stabletts_api(
     pretrained_model: Optional[str] = None,
     val_split: float = 0.1,
     best_metric: str = 'total_loss',
-    heartbeat_callback: Optional[Callable[[int], None]] = None
+    heartbeat_callback: Optional[Callable[[int], None]] = None,
+    log_file_path: Optional[str] = None,
+    use_tqdm: bool = True,
 ) -> Dict[str, Any]:
     """
     Python API for training StableTTS model.
@@ -496,15 +624,24 @@ def train_stabletts_api(
         val_split: Fraction of dataset to use for validation (0.0-1.0)
         best_metric: Metric to track for saving best model
         heartbeat_callback: Optional callback function called after each epoch with epoch number
+        log_file_path: Optional path to a log file.  The spawned child process
+            will open this file in append mode and tee stdout/stderr into it,
+            ensuring training output is captured even though
+            ``torch.multiprocessing.spawn`` creates a separate process.
+        use_tqdm: If True (default), use tqdm progress bars.  If False, use
+            periodic text-based progress suitable for log files.
 
     Returns:
         Dictionary with:
             - success: bool
             - epochs_completed: int
             - best_model_path: str (path to best model checkpoint)
+            - best_epoch: int (epoch number of the best model, or -1)
+            - best_metric_value: float (best validation metric value)
+            - epoch_metrics: list[dict] (per-epoch loss data)
             - error_message: str (if success is False)
     """
-    global _heartbeat_callback
+    global _heartbeat_callback, _use_tqdm
 
     try:
         # Validate arguments
@@ -513,6 +650,9 @@ def train_stabletts_api(
                 'success': False,
                 'epochs_completed': 0,
                 'best_model_path': None,
+                'best_epoch': -1,
+                'best_metric_value': None,
+                'epoch_metrics': [],
                 'error_message': f"Training dataset not found at: {train_dataset_path}"
             }
 
@@ -521,6 +661,9 @@ def train_stabletts_api(
                 'success': False,
                 'epochs_completed': 0,
                 'best_model_path': None,
+                'best_epoch': -1,
+                'best_metric_value': None,
+                'epoch_metrics': [],
                 'error_message': f"val_split must be between 0.0 and 1.0 (got {val_split})"
             }
 
@@ -529,6 +672,9 @@ def train_stabletts_api(
                 'success': False,
                 'epochs_completed': 0,
                 'best_model_path': None,
+                'best_epoch': -1,
+                'best_metric_value': None,
+                'epoch_metrics': [],
                 'error_message': f"Specified checkpoint not found at: {checkpoint}"
             }
 
@@ -537,6 +683,9 @@ def train_stabletts_api(
                 'success': False,
                 'epochs_completed': 0,
                 'best_model_path': None,
+                'best_epoch': -1,
+                'best_metric_value': None,
+                'epoch_metrics': [],
                 'error_message': f"Specified pretrained model not found at: {pretrained_model}"
             }
 
@@ -545,6 +694,9 @@ def train_stabletts_api(
                 'success': False,
                 'epochs_completed': 0,
                 'best_model_path': None,
+                'best_epoch': -1,
+                'best_metric_value': None,
+                'epoch_metrics': [],
                 'error_message': "Cannot specify both checkpoint and pretrained_model"
             }
 
@@ -555,11 +707,15 @@ def train_stabletts_api(
                 'success': False,
                 'epochs_completed': 0,
                 'best_model_path': None,
+                'best_epoch': -1,
+                'best_metric_value': None,
+                'epoch_metrics': [],
                 'error_message': "No CUDA devices available. Training requires GPU(s)."
             }
 
-        # Set heartbeat callback
+        # Set globals for child processes
         _heartbeat_callback = heartbeat_callback
+        _use_tqdm = use_tqdm
 
         # Create args namespace (TrainingArgs is at module level for pickling)
         args = TrainingArgs()
@@ -575,6 +731,7 @@ def train_stabletts_api(
         args.pretrained_model = pretrained_model
         args.val_split = val_split
         args.best_metric = best_metric
+        args.log_file_path = log_file_path
 
         # Set thread limits (guard against being called after parallel work
         # has already started, e.g. when preprocess_stabletts ran a Pool first)
@@ -589,6 +746,18 @@ def train_stabletts_api(
 
         # Run training
         torch.multiprocessing.spawn(train, args=(world_size, args), nprocs=world_size)
+
+        # Read epoch metrics written by the child process
+        metrics_file = os.path.join(model_save_path, '_epoch_metrics.json')
+        epoch_metrics = []
+        best_epoch = -1
+        best_metric_value = None
+        if os.path.exists(metrics_file):
+            with open(metrics_file, 'r', encoding='utf-8') as f:
+                metrics_data = json.load(f)
+            epoch_metrics = metrics_data.get('epoch_metrics', [])
+            best_epoch = metrics_data.get('best_epoch', -1)
+            best_metric_value = metrics_data.get('best_val_metric')
 
         # Check for best model
         best_model_path = os.path.join(model_save_path, 'best_model.pt')
@@ -606,6 +775,9 @@ def train_stabletts_api(
             'success': True,
             'epochs_completed': num_epochs,
             'best_model_path': best_model_path,
+            'best_epoch': best_epoch,
+            'best_metric_value': best_metric_value,
+            'epoch_metrics': epoch_metrics,
             'error_message': None
         }
 
@@ -616,10 +788,14 @@ def train_stabletts_api(
             'success': False,
             'epochs_completed': 0,
             'best_model_path': None,
+            'best_epoch': -1,
+            'best_metric_value': None,
+            'epoch_metrics': [],
             'error_message': error_msg
         }
     finally:
         _heartbeat_callback = None
+        _use_tqdm = True
 
 
 def main():

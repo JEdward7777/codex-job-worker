@@ -10,9 +10,10 @@ import os
 import sys
 import csv
 import traceback
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -146,7 +147,8 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             uroman_language=uroman_lang,
             resample=False,
             num_workers=2,
-            heartbeat_callback=lambda: callbacks.heartbeat(message="Preprocessing data", stage="preprocess")
+            heartbeat_callback=lambda: callbacks.heartbeat(message="Preprocessing data", stage="preprocess"),
+            use_tqdm=False,
         )
 
         if not preprocess_result['success']:
@@ -226,7 +228,9 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             pretrained_model=pretrained_model,
             val_split=val_split,
             best_metric='total_loss',
-            heartbeat_callback=training_heartbeat
+            heartbeat_callback=training_heartbeat,
+            log_file_path=str(callbacks.log_path),
+            use_tqdm=False,
         )
 
         if not train_result['success']:
@@ -237,16 +241,52 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         print(f"  Training completed: {train_result['epochs_completed']} epochs")
         print(f"  Best model: {train_result['best_model_path']}")
+        best_epoch = train_result.get('best_epoch', -1)
+        best_metric_value = train_result.get('best_metric_value')
+        if best_epoch >= 0:
+            print(f"  Best epoch: {best_epoch} (total_loss: {best_metric_value})")
 
-        # Step 5: Upload checkpoint to GitLab
-        print("\nStep 5: Uploading checkpoint to GitLab...")
-        callbacks.heartbeat(message="Uploading checkpoint", stage="upload")
+        # Step 5: Prepare artifacts and upload to GitLab
+        print("\nStep 5: Preparing artifacts and uploading to GitLab...")
+        callbacks.heartbeat(message="Uploading checkpoint and artifacts", stage="upload")
 
+        # 5a: Zip TensorBoard events
+        tb_zip_path = None
+        if log_dir.exists() and any(log_dir.iterdir()):
+            tb_zip_path = work_dir / "tensorboard_events.zip"
+            print(f"  Zipping TensorBoard events from {log_dir}...")
+            with zipfile.ZipFile(str(tb_zip_path), 'w', zipfile.ZIP_DEFLATED) as zf:
+                for root, _dirs, files in os.walk(str(log_dir)):
+                    for fname in files:
+                        full_path = os.path.join(root, fname)
+                        arcname = os.path.relpath(full_path, str(log_dir))
+                        zf.write(full_path, arcname)
+            print(f"  TensorBoard events zipped: {tb_zip_path}")
+
+        # 5b: Write training metrics CSV
+        metrics_csv_path = None
+        epoch_metrics = train_result.get('epoch_metrics', [])
+        if epoch_metrics:
+            metrics_csv_path = work_dir / "training_metrics.csv"
+            csv_columns = [
+                'epoch', 'train_total_loss', 'train_diff_loss', 'train_dur_loss',
+                'train_prior_loss', 'val_total_loss', 'val_diff_loss',
+                'val_dur_loss', 'val_prior_loss'
+            ]
+            with open(str(metrics_csv_path), 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=csv_columns)
+                writer.writeheader()
+                writer.writerows(epoch_metrics)
+            print(f"  Training metrics CSV written: {metrics_csv_path}")
+
+        # 5c: Upload all artifacts in a single batch commit
         upload_result = _upload_checkpoint(
             job_context=job_context,
             callbacks=callbacks,
             checkpoint_path=train_result['best_model_path'],
-            job_id=job_context['job_id']
+            job_id=job_context['job_id'],
+            tensorboard_zip_path=str(tb_zip_path) if tb_zip_path else None,
+            metrics_csv_path=str(metrics_csv_path) if metrics_csv_path else None,
         )
 
         if not upload_result['success']:
@@ -256,6 +296,9 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             }
 
         print(f"  Uploaded checkpoint to: {upload_result['remote_path']}")
+        if upload_result.get('extra_paths'):
+            for p in upload_result['extra_paths']:
+                print(f"  Uploaded: {p}")
 
         print("\n" + "=" * 60)
         print("Training completed successfully!")
@@ -265,7 +308,9 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             'success': True,
             'error_message': None,
             'epochs_completed': train_result['epochs_completed'],
-            'checkpoint_path': upload_result['remote_path']
+            'checkpoint_path': upload_result['remote_path'],
+            'best_epoch': best_epoch,
+            'best_metric_value': best_metric_value,
         }
 
     except Exception as e:
@@ -499,18 +544,61 @@ def _upload_checkpoint(
     job_context: Dict[str, Any],
     callbacks,
     checkpoint_path: str,
-    job_id: str
+    job_id: str,
+    tensorboard_zip_path: Optional[str] = None,
+    metrics_csv_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Upload a checkpoint to GitLab using LFS.
+    Upload a checkpoint (and optional artifacts) to GitLab using LFS.
+
+    All files are uploaded in a single batch commit so they appear atomically.
+
+    Args:
+        job_context: Job configuration dict.
+        callbacks: JobCallbacks instance.
+        checkpoint_path: Local path to the best model .pt file.
+        job_id: Job identifier string.
+        tensorboard_zip_path: Optional local path to a zipped TensorBoard
+            events directory.  Uploaded via LFS.
+        metrics_csv_path: Optional local path to a training metrics CSV.
+            Uploaded as a regular (non-LFS) file.
 
     Returns:
-        Dictionary with success, remote_path, error_message
+        Dictionary with success, remote_path, extra_paths, error_message
     """
     try:
-        # Determine remote path
+        # Determine remote paths
         checkpoint_filename = os.path.basename(checkpoint_path)
         remote_path = f"gpu_jobs/job_{job_id}/checkpoint/{checkpoint_filename}"
+
+        # Build file list for batch upload
+        files: List[Dict[str, Any]] = [
+            {
+                'local_path': checkpoint_path,
+                'remote_path': remote_path,
+                'lfs': True,  # Model checkpoints always use LFS
+            }
+        ]
+
+        extra_paths: List[str] = []
+
+        if tensorboard_zip_path and os.path.exists(tensorboard_zip_path):
+            tb_remote = f"gpu_jobs/job_{job_id}/checkpoint/tensorboard_events.zip"
+            files.append({
+                'local_path': tensorboard_zip_path,
+                'remote_path': tb_remote,
+                'lfs': True,  # Zip can be large, use LFS
+            })
+            extra_paths.append(tb_remote)
+
+        if metrics_csv_path and os.path.exists(metrics_csv_path):
+            csv_remote = f"gpu_jobs/job_{job_id}/checkpoint/training_metrics.csv"
+            files.append({
+                'local_path': metrics_csv_path,
+                'remote_path': csv_remote,
+                'lfs': False,  # Small CSV, no need for LFS
+            })
+            extra_paths.append(csv_remote)
 
         # Create uploader instance using callbacks credentials
         uploader = GitLabDatasetDownloader(
@@ -520,26 +608,24 @@ def _upload_checkpoint(
             project_id=str(job_context['project_id']),
         )
 
-        # Upload checkpoint using LFS (model files should always use LFS)
+        # Upload all files in a single batch commit
         result = uploader.upload_batch(
-            files=[{
-                'local_path': checkpoint_path,
-                'remote_path': remote_path,
-                'lfs': True,  # Model checkpoints always use LFS
-            }],
-            commit_message=f"Upload checkpoint for job {job_id}"
+            files=files,
+            commit_message=f"Upload checkpoint and artifacts for job {job_id}"
         )
 
         if result['success']:
             return {
                 'success': True,
                 'remote_path': remote_path,
+                'extra_paths': extra_paths,
                 'error_message': None
             }
         else:
             return {
                 'success': False,
                 'remote_path': None,
+                'extra_paths': [],
                 'error_message': result.get('error_message', 'Upload failed')
             }
 
@@ -547,5 +633,6 @@ def _upload_checkpoint(
         return {
             'success': False,
             'remote_path': None,
+            'extra_paths': [],
             'error_message': f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
         }

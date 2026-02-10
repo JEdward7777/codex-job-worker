@@ -50,6 +50,23 @@ from text.japanese import japanese_to_ipa2 #pylint: disable=import-error, wrong-
 
 device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
+
+def periodic_progress(iterable, total=None, desc="", interval=100):
+    """Drop-in replacement for ``tqdm`` that prints a status line every
+    *interval* items instead of a continuous progress bar.  Useful when
+    stdout is captured to a log file where progress-bar control characters
+    create noise."""
+    last = 0
+    for i, item in enumerate(iterable):
+        if i % interval == 0:
+            total_str = f"/{total}" if total else ""
+            print(f"  {desc}: {i}{total_str}")
+        last = i
+        yield item
+    total_str = f"/{total}" if total else ""
+    print(f"  {desc}: done ({last + 1}{total_str})")
+
+
 g2p_mapping = {
     'chinese': chinese_to_cnm3,
     'japanese': japanese_to_ipa2,
@@ -179,7 +196,8 @@ def preprocess_stabletts_api(
     uroman_language: Optional[str] = None,
     resample: bool = False,
     num_workers: int = 2,
-    heartbeat_callback: Optional[Callable[[], None]] = None
+    heartbeat_callback: Optional[Callable[[], None]] = None,
+    use_tqdm: bool = True,
 ) -> Dict[str, Any]:
     """
     Python API for preprocessing audio dataset for StableTTS training.
@@ -195,6 +213,8 @@ def preprocess_stabletts_api(
         resample: Whether to save resampled audio files
         num_workers: Number of worker processes
         heartbeat_callback: Optional callback function to call periodically for long-running jobs
+        use_tqdm: If True (default), use tqdm progress bars.  If False, use
+            periodic text-based progress suitable for log files.
 
     Returns:
         Dictionary with:
@@ -251,7 +271,15 @@ def preprocess_stabletts_api(
                   initializer=init_worker,
                   initargs=(mel_cfg, language, output_mel_dir, output_wav_dir, resample, json_dir, use_uroman, uroman_language)) as pool:
 
-            for idx, result in enumerate(tqdm(pool.imap(process_filelist, input_filelist), total=total_count)):
+            if use_tqdm:
+                progress_iter = tqdm(pool.imap(process_filelist, input_filelist), total=total_count)
+            else:
+                progress_iter = periodic_progress(
+                    pool.imap(process_filelist, input_filelist),
+                    total=total_count, desc="Preprocessing", interval=100
+                )
+
+            for idx, result in enumerate(progress_iter):
                 if result is not None:
                     results.append(f'{result}\n')
 
