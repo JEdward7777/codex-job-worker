@@ -1440,6 +1440,7 @@ class CLI:
     - examine: Examine a specific JSON/CODEX file
     - debug: Debug mode with detailed analysis
     - process: Process all CODEX files and create HuggingFace dataset
+    - download: Download a specific file from GitLab (handles LFS automatically)
     - upload: Upload files to GitLab with optional LFS support
 
     All commands support:
@@ -1530,6 +1531,96 @@ class CLI:
         print()
         downloader = GitLabDatasetDownloader(config_path=config_path, config_overrides=config_overrides)
         downloader.process()
+
+    def download(
+        self,
+        remote_path: str,
+        output_path: str,
+        token: Optional[str] = None,
+        gitlab_url: Optional[str] = None,
+        project_id: Optional[str] = None,
+        project_path: Optional[str] = None,
+        config_path: Optional[str] = None,
+    ):
+        """Download a specific file from GitLab (automatically handles LFS files).
+
+        Args:
+            remote_path: Path to the file in the GitLab repository
+            output_path: Local path where the file should be saved
+            token: GitLab access token (or use GITLAB_TOKEN env var)
+            gitlab_url: GitLab server URL (defaults to https://git.genesisrnd.com)
+            project_id: Numeric project ID
+            project_path: Project path like "namespace/project"
+            config_path: Optional path to config.yaml for credentials
+
+        Examples:
+            # Download an LFS file using config.yaml for server/project info
+            python gitlab_to_hf_dataset.py download \\
+                --remote-path="audio/file.wav" \\
+                --output-path="./downloads/file.wav"
+
+            # Download with explicit credentials
+            python gitlab_to_hf_dataset.py download \\
+                --token=TOKEN --project-id=454 \\
+                --remote-path="models/checkpoint.pt" \\
+                --output-path="./checkpoint.pt"
+
+            # Download using project path instead of numeric ID
+            python gitlab_to_hf_dataset.py download \\
+                --token=TOKEN --project-path="namespace/project" \\
+                --remote-path="data/dataset.tar.gz" \\
+                --output-path="./dataset.tar.gz"
+        """
+        print("=" * 60)
+        print("GitLab File Download")
+        print("=" * 60)
+        print()
+
+        # Get token from parameter or environment
+        access_token = token or os.environ.get('GITLAB_TOKEN')
+        if not access_token:
+            print("ERROR: No GitLab token provided. Use --token or set GITLAB_TOKEN env var.")
+            return {'success': False, 'error': 'No token provided'}
+
+        # Require project identification
+        if not project_id and not project_path:
+            print("ERROR: Must provide either --project-id or --project-path")
+            return {'success': False, 'error': 'No project specified'}
+
+        # Create downloader instance
+        downloader = GitLabDatasetDownloader(
+            config_path=config_path,
+            gitlab_url=gitlab_url,
+            access_token=access_token,
+            project_id=project_id,
+            project_path=project_path,
+        )
+
+        print(f"Server: {downloader.server_url}")
+        print(f"Project: {downloader.project_path or downloader.project_id_number}")
+        print(f"Remote file: {remote_path}")
+        print(f"Output path: {output_path}")
+        print()
+
+        # Create output directory if needed
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+
+        # Download the file (automatically handles LFS)
+        print("Downloading file...")
+        success = downloader.download_file(remote_path, output_file)
+
+        if success:
+            file_size = output_file.stat().st_size
+            print()
+            print("✓ Download successful!")
+            print(f"  File saved to: {output_path}")
+            print(f"  File size: {file_size:,} bytes ({file_size / 1024 / 1024:.2f} MB)")
+            return {'success': True, 'output_path': output_path, 'size': file_size}
+        else:
+            print()
+            print("✗ Download failed!")
+            return {'success': False, 'error': 'Download failed'}
 
     def upload(
         self,
