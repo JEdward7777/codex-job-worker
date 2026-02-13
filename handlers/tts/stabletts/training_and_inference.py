@@ -87,7 +87,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         # Get model parameters
         model_type = model_config.get('type', 'StableTTS')
         base_checkpoint = model_config.get('base_checkpoint')
-        reference_audio_path = model_config.get('reference_audio') or job_context.get('voice_reference')
+        reference_audio_path = job_context.get('voice_reference')
         language = model_config.get('language', 'english')
         # use_uroman is resolved after data download (may need auto-detection)
         uroman_lang = model_config.get('uroman_lang', None)

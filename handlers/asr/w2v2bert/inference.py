@@ -71,7 +71,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         inference_config = job_context.get('inference', {})
 
         # Get model path - either from job output or specified path
-        model_path = model_config.get('checkpoint_path')
+        model_path = model_config.get('base_checkpoint')
         if not model_path:
             # Check if there's a trained model from a previous training job
             model_path = job_context.get('trained_model_path')
@@ -79,7 +79,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         if not model_path:
             return {
                 'success': False,
-                'error_message': "No model path specified. Set model.checkpoint_path in job config."
+                'error_message': "No model path specified. Set model.base_checkpoint in job config."
             }
 
         # Get model parameters
