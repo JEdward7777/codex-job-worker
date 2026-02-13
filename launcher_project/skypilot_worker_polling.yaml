@@ -1,10 +1,11 @@
-# SkyPilot task file for codex-job-worker (drain-and-exit mode)
+# SkyPilot task file for codex-job-worker (persistent polling mode)
 #
-# Processes all available jobs, pulling code updates between each one,
-# then exits when no more jobs are available.  This avoids paying for
-# idle VM time.
+# Processes jobs continuously, pulling code updates between each one.
+# When no jobs are available, waits LOOP_INTERVAL seconds (default 300)
+# before checking again.  The worker never exits on its own — it keeps
+# the VM alive and polls indefinitely.
 #
-# For a persistent worker that polls for new jobs, see skypilot_worker_polling.yaml.
+# For a cost-saving worker that exits when idle, see skypilot_worker.yaml.
 #
 # Usage:
 #   # Set secrets as environment variables first
@@ -12,10 +13,13 @@
 #   export WORKER_ID=your_worker_id
 #
 #   # Launch with SkyPilot (secrets passed via --env)
-#   sky launch skypilot_worker.yaml --env GITLAB_TOKEN --env WORKER_ID
+#   sky launch skypilot_worker_polling.yaml --env GITLAB_TOKEN --env WORKER_ID
 #
 #   # Or use an env file (not committed to repo)
-#   sky launch skypilot_worker.yaml --env-file .env.secrets
+#   sky launch skypilot_worker_polling.yaml --env-file .env.secrets
+#
+#   # Override the polling interval (e.g. 60 seconds):
+#   sky launch skypilot_worker_polling.yaml --env GITLAB_TOKEN --env WORKER_ID --env LOOP_INTERVAL=60
 #
 # The .env.secrets file format:
 #   GITLAB_TOKEN=your_gitlab_token
@@ -24,7 +28,7 @@
 # Supported clouds: aws, gcp, azure, lambda, runpod, kubernetes, vast
 # See: https://vast.ai/article/vast-ai-gpus-can-now-be-rentend-through-skypilot
 
-name: codex-job-worker
+name: codex-job-worker-polling
 
 resources:
   # Supported clouds: aws, gcp, azure, lambda, runpod, kubernetes, vast
@@ -78,7 +82,7 @@ run: |
   # Validate required environment variables
   if [ -z "$GITLAB_TOKEN" ]; then
     echo "ERROR: GITLAB_TOKEN environment variable is required"
-    echo "Launch with: sky launch skypilot_worker.yaml --env GITLAB_TOKEN=your_token --env WORKER_ID=your_id"
+    echo "Launch with: sky launch skypilot_worker_polling.yaml --env GITLAB_TOKEN=your_token --env WORKER_ID=your_id"
     exit 1
   fi
 
@@ -88,12 +92,12 @@ run: |
   fi
 
   # Run the worker via the loop wrapper.
-  # --loop-interval -1 = exit when no jobs are available (drain-and-exit).
+  # --loop-interval $LOOP_INTERVAL = wait that many seconds when idle, then re-check.
   # The bash wrapper handles git pull + restart between jobs.
   bash run_worker_loop.sh \
     --token "$GITLAB_TOKEN" \
     --worker-id "$WORKER_ID" \
-    --loop-interval -1 \
+    --loop-interval "$LOOP_INTERVAL" \
     --keep-jobs 5 \
     --verbose
 
@@ -108,3 +112,6 @@ envs:
 
   # Optional: Work directory for job files
   WORK_DIR: "/tmp/gpu_work"
+
+  # Polling interval in seconds when no jobs are available (default: 300 = 5 minutes)
+  LOOP_INTERVAL: "300"

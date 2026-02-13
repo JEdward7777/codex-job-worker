@@ -31,6 +31,11 @@ from gitlab.exceptions import GitlabCreateError
 from gitlab_jobs import GitLabJobScanner, NoJobsAvailableError, DEFAULT_GITLAB_URL, RESPONSE_FILE_PATH_TEMPLATE
 
 
+# Exit code that signals the calling bash wrapper to git-pull and restart
+# the worker process.  Any other exit code causes the wrapper to stop.
+EXIT_CODE_UPDATE_RESTART = 22
+
+
 class JobCanceledException(Exception):
     """Raised when a job is canceled. Handler can catch to cleanup before re-raising."""
 
@@ -569,6 +574,18 @@ def main():
         help='Force-run a specific job, skipping claim. Format: PROJECT_ID:JOB_ID'
     )
 
+    # Return-update mode: exit with EXIT_CODE_UPDATE_RESTART (22) instead of
+    # looping internally, so a calling bash wrapper can git-pull and restart.
+    parser.add_argument(
+        '--enable-return-update',
+        action='store_true',
+        help=(
+            'Instead of looping internally, exit with code 22 after each job '
+            '(or after an idle sleep) so a wrapper script can git-pull and '
+            'restart the worker with updated code.'
+        )
+    )
+
     args = parser.parse_args()
 
     # Validate required arguments
@@ -594,6 +611,8 @@ def main():
         print(f"FORCE MODE: {args.force_job}")
     else:
         print(f"Loop Interval: {args.loop_interval}s" if args.loop_interval >= 0 else "Loop Interval: Exit when done")
+    if args.enable_return_update:
+        print(f"Return-Update Mode: enabled (exit code {EXIT_CODE_UPDATE_RESTART} = restart)")
     print(f"Keep Jobs: {args.keep_jobs}")
     print("=" * 60)
     print()
@@ -686,6 +705,12 @@ def main():
                 # Cleanup old job directories
                 cleanup_old_jobs(work_dir, args.keep_jobs)
 
+                # In return-update mode, exit after each job so the wrapper
+                # can git-pull and restart with updated code.
+                if args.enable_return_update:
+                    print(f"Return-update mode: exiting with code {EXIT_CODE_UPDATE_RESTART} for restart.")
+                    sys.exit(EXIT_CODE_UPDATE_RESTART)
+
         except NoJobsAvailableError:
             print("No jobs available.")
 
@@ -695,6 +720,12 @@ def main():
 
             print(f"Waiting {args.loop_interval} seconds before next scan...")
             time.sleep(args.loop_interval)
+
+            # In return-update mode, exit after the sleep so the wrapper
+            # can git-pull before re-scanning.
+            if args.enable_return_update:
+                print(f"Return-update mode: exiting with code {EXIT_CODE_UPDATE_RESTART} for restart.")
+                sys.exit(EXIT_CODE_UPDATE_RESTART)
 
         except KeyboardInterrupt:
             print("\nInterrupted by user.")
@@ -713,6 +744,12 @@ def main():
 
             print(f"Waiting {args.loop_interval} seconds before retry...")
             time.sleep(args.loop_interval)
+
+            # In return-update mode, exit after the error sleep so the
+            # wrapper can git-pull (the fix might be in the updated code).
+            if args.enable_return_update:
+                print(f"Return-update mode: exiting with code {EXIT_CODE_UPDATE_RESTART} for restart.")
+                sys.exit(EXIT_CODE_UPDATE_RESTART)
 
     # Summary
     print()
