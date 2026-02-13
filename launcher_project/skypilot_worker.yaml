@@ -11,11 +11,15 @@
 #   export GITLAB_TOKEN=your_gitlab_token
 #   export WORKER_ID=your_worker_id
 #
-#   # Launch with SkyPilot (secrets passed via --env)
-#   sky launch skypilot_worker.yaml --env GITLAB_TOKEN --env WORKER_ID
+#   # Launch with --down to auto-terminate the VM when the run script exits.
+#   # This tears down the cluster after all jobs finish (no idle charges).
+#   sky launch skypilot_worker.yaml --down --env GITLAB_TOKEN --env WORKER_ID
+#
+#   # Or with an idle grace period (e.g. 5 min) before teardown:
+#   sky launch skypilot_worker.yaml --down -i 5 --env GITLAB_TOKEN --env WORKER_ID
 #
 #   # Or use an env file (not committed to repo)
-#   sky launch skypilot_worker.yaml --env-file .env.secrets
+#   sky launch skypilot_worker.yaml --down --env-file .env.secrets
 #
 # The .env.secrets file format:
 #   GITLAB_TOKEN=your_gitlab_token
