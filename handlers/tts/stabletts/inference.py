@@ -428,6 +428,93 @@ def _download_inference_data(
         }
 
 
+def _get_book_code(codex_path: str) -> str:
+    """
+    Extract the book code from a codex file path.
+
+    Examples:
+        'target/MAT.codex' -> 'MAT'
+        'files/target/EXO.codex' -> 'EXO'
+        'LUK.codex' -> 'LUK'
+    """
+    filename = os.path.basename(codex_path)
+    return filename.rsplit('.', 1)[0]
+
+
+def _get_audio_file_metadata(local_path: Path, audio_format: str) -> Dict[str, Any]:
+    """
+    Compute metadata for an audio file (size, duration, sample rate, etc.).
+
+    Returns a metadata dict matching the codex attachment metadata schema:
+        mimeType, sizeBytes, sampleRate, channels, durationSec, bitrateKbps
+    """
+    metadata = {}
+
+    # File size is always available
+    try:
+        metadata['sizeBytes'] = local_path.stat().st_size
+    except OSError:
+        metadata['sizeBytes'] = 0
+
+    # MIME type from format
+    mime_map = {
+        'webm': 'audio/webm',
+        'wav': 'audio/wav',
+        'mp3': 'audio/mpeg',
+        'ogg': 'audio/ogg',
+        'flac': 'audio/flac',
+    }
+    metadata['mimeType'] = mime_map.get(audio_format, f'audio/{audio_format}')
+
+    # Try to get audio properties using mutagen or ffprobe
+    try:
+        import mutagen
+        audio = mutagen.File(str(local_path))
+        if audio is not None:
+            if hasattr(audio.info, 'sample_rate') and audio.info.sample_rate:
+                metadata['sampleRate'] = audio.info.sample_rate
+            if hasattr(audio.info, 'channels') and audio.info.channels:
+                metadata['channels'] = audio.info.channels
+            if hasattr(audio.info, 'length') and audio.info.length:
+                metadata['durationSec'] = round(audio.info.length, 2)
+            if hasattr(audio.info, 'bitrate') and audio.info.bitrate:
+                metadata['bitrateKbps'] = round(audio.info.bitrate / 1000)
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # If mutagen didn't get duration, try ffprobe as fallback
+    if 'durationSec' not in metadata:
+        try:
+            import subprocess
+            result = subprocess.run(
+                ['ffprobe', '-v', 'quiet', '-print_format', 'json',
+                 '-show_format', '-show_streams', str(local_path)],
+                capture_output=True, text=True, timeout=10
+            )
+            if result.returncode == 0:
+                import json as json_mod
+                probe = json_mod.loads(result.stdout)
+                fmt_info = probe.get('format', {})
+                if 'duration' in fmt_info:
+                    metadata['durationSec'] = round(float(fmt_info['duration']), 2)
+                if 'bit_rate' in fmt_info and 'bitrateKbps' not in metadata:
+                    metadata['bitrateKbps'] = round(int(fmt_info['bit_rate']) / 1000)
+                # Check streams for sample rate and channels
+                for stream in probe.get('streams', []):
+                    if stream.get('codec_type') == 'audio':
+                        if 'sample_rate' in stream and 'sampleRate' not in metadata:
+                            metadata['sampleRate'] = int(stream['sample_rate'])
+                        if 'channels' in stream and 'channels' not in metadata:
+                            metadata['channels'] = int(stream['channels'])
+                        break
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            pass
+
+    return metadata
+
+
 def _upload_audio_and_update_codex(
     job_context: Dict[str, Any],
     callbacks,
@@ -439,6 +526,10 @@ def _upload_audio_and_update_codex(
     """
     Upload generated audio files to GitLab (LFS) and update .codex files (regular git)
     in a single commit.
+
+    Audio files are uploaded to .project/attachments/pointers/{BOOK}/ in git,
+    and the codex url field references .project/attachments/files/{BOOK}/ which
+    is where the codex environment maps them for local access.
 
     Returns:
         Dictionary with success, uploaded_count, error_message
@@ -469,9 +560,19 @@ def _upload_audio_and_update_codex(
                 print(f"    Warning: Audio file not found: {local_audio_path}")
                 continue
 
+            # Derive book code from codex path (e.g., 'target/EXO.codex' -> 'EXO')
+            book_code = _get_book_code(codex_path)
+
             # Generate audio ID for GitLab
             audio_id = f"audio-{int(time.time() * 1000)}-{uuid.uuid4().hex[:8]}"
-            remote_audio_path = f".project/audio/{audio_id}.{audio_format}"
+
+            # Git upload path uses 'pointers' directory
+            remote_audio_path = f".project/attachments/pointers/{book_code}/{audio_id}.{audio_format}"
+            # Codex url field uses 'files' directory (where codex env maps them)
+            codex_audio_url = f".project/attachments/files/{book_code}/{audio_id}.{audio_format}"
+
+            # Compute audio file metadata
+            audio_metadata = _get_audio_file_metadata(local_audio_path, audio_format)
 
             # Add audio file to upload list (LFS for audio)
             files_to_upload.append({
@@ -484,10 +585,13 @@ def _upload_audio_and_update_codex(
             if codex_path not in codex_updates:
                 codex_updates[codex_path] = []
 
+            now_ms = int(time.time() * 1000)
             codex_updates[codex_path].append({
                 'cell_id': cell_id,
                 'audio_id': audio_id,
-                'audio_format': audio_format
+                'codex_audio_url': codex_audio_url,
+                'audio_metadata': audio_metadata,
+                'timestamp_ms': now_ms,
             })
 
         # Update .codex files in memory and add to upload list
@@ -501,7 +605,9 @@ def _upload_audio_and_update_codex(
             for update in updates:
                 cell_id = update['cell_id']
                 audio_id = update['audio_id']
-                fmt = update['audio_format']
+                codex_audio_url = update['codex_audio_url']
+                audio_meta = update['audio_metadata']
+                ts = update['timestamp_ms']
 
                 # Find and update the cell
                 for cell in cells:
@@ -509,15 +615,25 @@ def _upload_audio_and_update_codex(
                         metadata = cell.setdefault('metadata', {})
                         attachments = metadata.setdefault('attachments', {})
 
-                        # Add audio attachment
-                        attachments[audio_id] = {
+                        # Build attachment object matching codex schema
+                        attachment = {
+                            'url': codex_audio_url,
                             'type': 'audio',
-                            'format': fmt,
-                            'isGenerated': True
+                            'createdAt': ts,
+                            'updatedAt': ts,
+                            'isDeleted': False,
+                            'isGenerated': True,
                         }
 
-                        # Set as selected audio
+                        # Add audio metadata sub-object
+                        if audio_meta:
+                            attachment['metadata'] = audio_meta
+
+                        attachments[audio_id] = attachment
+
+                        # Set as selected audio with timestamp
                         metadata['selectedAudioId'] = audio_id
+                        metadata['selectionTimestamp'] = ts
                         break
 
             # Add updated codex file to upload list (regular git, not LFS)
