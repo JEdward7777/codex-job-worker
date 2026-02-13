@@ -333,17 +333,6 @@ def _download_inference_data(
         project_id = job_context['project_id']
         scanner = callbacks.scanner
 
-        codex_files = job_context.get('codex_files', [])
-
-        if not codex_files:
-            return {
-                'success': False,
-                'metadata_csv': None,
-                'sample_count': 0,
-                'codex_data': {},
-                'error_message': "No codex_files specified in job configuration"
-            }
-
         # Create downloader for file operations (handles LFS transparently)
         downloader = GitLabDatasetDownloader(
             config_path=None,
@@ -354,6 +343,22 @@ def _download_inference_data(
                 'dataset.output_dir': str(output_dir),
             }
         )
+
+        # Auto-discover .codex files from the repository
+        print("  Listing repository files...")
+        items = downloader.list_repository_tree()
+        codex_files = [item['path'] for item in items if item['name'].endswith('.codex')]
+
+        if not codex_files:
+            return {
+                'success': False,
+                'metadata_csv': None,
+                'sample_count': 0,
+                'codex_data': {},
+                'error_message': "No .codex files found in repository"
+            }
+
+        print(f"  Found {len(codex_files)} .codex files in repository")
 
         # Create metadata CSV
         metadata_csv = output_dir / "metadata.csv"

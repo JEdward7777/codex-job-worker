@@ -296,20 +296,16 @@ def _download_training_data(
         print("  Building audio files map...")
         audio_files_map = downloader.build_audio_files_map(items)
 
-        # Get list of .codex files from job config or find them in repository
-        job_config = job_context.get('job_config', {})
-        codex_files = job_config.get('codex_files', [])
-
+        # Auto-discover .codex files from the repository
+        codex_files = [item['path'] for item in items if item['name'].endswith('.codex')]
         if not codex_files:
-            codex_files = [item['path'] for item in items if item['name'].endswith('.codex')]
-            if not codex_files:
-                return {
-                    'success': False,
-                    'metadata_csv': None,
-                    'sample_count': 0,
-                    'error_message': "No .codex files found in repository"
-                }
-            print(f"  Found {len(codex_files)} .codex files in repository")
+            return {
+                'success': False,
+                'metadata_csv': None,
+                'sample_count': 0,
+                'error_message': "No .codex files found in repository"
+            }
+        print(f"  Found {len(codex_files)} .codex files in repository")
 
         # Create metadata CSV
         metadata_csv = output_dir / "metadata.csv"

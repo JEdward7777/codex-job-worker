@@ -137,13 +137,6 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         project_id = job_context['project_id']
         scanner = callbacks.scanner
-        codex_files = job_context.get('codex_files', [])
-
-        if not codex_files:
-            return {
-                'success': False,
-                'error_message': "No codex_files specified in job configuration"
-            }
 
         # ============================================================
         # PHASE 1: Download and prepare training data
@@ -168,6 +161,15 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         items = downloader.list_repository_tree()
         audio_files_map = downloader.build_audio_files_map(items)
         print(f"  Found {len(audio_files_map)} audio files in repository")
+
+        # Auto-discover .codex files from the repository
+        codex_files = [item['path'] for item in items if item['name'].endswith('.codex')]
+        if not codex_files:
+            return {
+                'success': False,
+                'error_message': "No .codex files found in repository"
+            }
+        print(f"  Found {len(codex_files)} .codex files in repository")
 
         # Download training data (cells with both audio and text)
         training_samples = []
