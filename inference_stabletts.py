@@ -174,7 +174,13 @@ class StableTTSInference:
         print("Model loaded successfully")
 
     def load_vocoder(self):
-        """Load the vocoder for mel-to-audio conversion."""
+        """Load the vocoder for mel-to-audio conversion.
+
+        Looks for vocos.pt in the local StableTTS/vocoders/pretrained/ directory
+        first.  If not found, auto-downloads from HuggingFace Hub using the
+        ``download_pretrained_model`` helper (which caches in
+        ``~/.cache/huggingface/hub/`` so the download only happens once).
+        """
         # Use vocos as the primary vocoder (as referenced in StableTTS)
         vocoder_path = os.path.join(
             os.path.dirname(__file__),
@@ -185,12 +191,11 @@ class StableTTSInference:
         )
 
         if not os.path.exists(vocoder_path):
-            raise FileNotFoundError(
-                f"Vocoder not found at {vocoder_path}. "
-                "Please ensure StableTTS vocoders are properly installed. "
-                "The Vocos vocoder can be downloaded from: "
-                "https://huggingface.co/KdaiP/StableTTS1.1/resolve/main/vocoders/vocos.pt "
-                "(HF Hub coordinates: repo_id='KdaiP/StableTTS1.1', filename='vocoders/vocos.pt')"
+            print(f"Vocoder not found at {vocoder_path}, downloading from HuggingFace Hub...")
+            from handlers.base import download_pretrained_model  # pylint: disable=import-outside-toplevel
+            vocoder_path = download_pretrained_model(
+                repo_id='KdaiP/StableTTS1.1',
+                filename='vocoders/vocos.pt',
             )
 
         print(f"Loading vocoder from: {vocoder_path}")
