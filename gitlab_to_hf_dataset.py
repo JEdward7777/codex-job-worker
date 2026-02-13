@@ -1109,8 +1109,12 @@ class GitLabDatasetDownloader:
         """Create a commit with multiple file actions.
 
         Args:
-            files: List of dicts with 'path', 'content', and 'action' keys
-                   action can be 'create' or 'update'
+            files: List of dicts with keys:
+                   - 'path': file path in the repository
+                   - 'action': 'create', 'update', 'delete', or 'move'
+                   - 'content': file content (not needed for 'delete' or 'move')
+                   - 'encoding': optional, 'base64' for binary content
+                   - 'previous_path': required for 'move' action
             commit_message: Commit message
             branch: Branch to commit to
 
@@ -1124,11 +1128,16 @@ class GitLabDatasetDownloader:
             action = {
                 'action': file_info.get('action', 'create'),
                 'file_path': file_info['path'],
-                'content': file_info['content']
             }
+            # Content is not needed for delete or move actions
+            if 'content' in file_info:
+                action['content'] = file_info['content']
             # For binary content, we need to base64 encode it
             if file_info.get('encoding') == 'base64':
                 action['encoding'] = 'base64'
+            # For move actions, include the previous path
+            if file_info.get('previous_path'):
+                action['previous_path'] = file_info['previous_path']
             actions.append(action)
 
         payload = {
@@ -1286,7 +1295,6 @@ class GitLabDatasetDownloader:
 
             # Check if file exists to determine action
             file_exists = self._check_file_exists(remote_path, branch)
-            action = 'update' if file_exists else 'create'
 
             if use_lfs:
                 # Compute LFS pointer using the opener (reads file for hash)
@@ -1304,18 +1312,51 @@ class GitLabDatasetDownloader:
                     'remote_path': remote_path
                 })
 
-                # Add pointer file to commit
+                # To avoid double-LFS encoding, we use a two-step approach:
+                # 1. Create the pointer file at a temp path with a .not_lfs suffix
+                #    (this suffix won't match .gitattributes LFS patterns, so GitLab
+                #    won't apply server-side LFS filtering to the pointer content)
+                # 2. Move (rename) it to the real path in the same commit
+                #
+                # If the file already exists, we delete it first to avoid conflicts.
+                temp_path = remote_path + '.not_lfs'
+
+                if file_exists:
+                    # Delete the existing file first
+                    commit_files.append({
+                        'path': remote_path,
+                        'action': 'delete',
+                        'lfs': True,
+                        'size': pointer_data['size'],
+                        'oid': pointer_data['oid'],
+                        '_lfs_helper': True,  # Mark as helper action (not a real upload)
+                    })
+
+                # Create the pointer at the temp path
                 commit_files.append({
-                    'path': remote_path,
+                    'path': temp_path,
                     'content': pointer_content,
-                    'action': action,
+                    'action': 'create',
                     'lfs': True,
                     'size': pointer_data['size'],
-                    'oid': pointer_data['oid']
+                    'oid': pointer_data['oid'],
+                    '_lfs_helper': True,  # Mark as helper action (not a real upload)
+                })
+
+                # Move from temp path to real path
+                commit_files.append({
+                    'path': remote_path,
+                    'previous_path': temp_path,
+                    'action': 'move',
+                    'lfs': True,
+                    'size': pointer_data['size'],
+                    'oid': pointer_data['oid'],
                 })
             else:
                 # Regular file - need to read content for commit
                 # (non-LFS files are included directly in the commit payload)
+                action = 'update' if file_exists else 'create'
+
                 with content_opener() as f:
                     file_content = f.read()
 
@@ -1391,7 +1432,10 @@ class GitLabDatasetDownloader:
                 )
 
                 # Mark all committed files as uploaded
+                # Skip helper actions (delete + create at temp path for LFS workaround)
                 for file_info in commit_files:
+                    if file_info.get('_lfs_helper'):
+                        continue
                     files_uploaded.append({
                         'remote_path': file_info['path'],
                         'lfs': file_info.get('lfs', False),
