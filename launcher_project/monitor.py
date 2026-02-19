@@ -205,7 +205,10 @@ def _sky_launch(
     stream: bool = False,
 ) -> bool:
     """
-    Launch a SkyPilot cluster using the Python API.
+    Launch a SkyPilot cluster using the CLI (subprocess).
+
+    The Python API hits fileno errors in SSH/cron contexts, so we use
+    the CLI which works reliably.
 
     Args:
         yaml_path: Path to the SkyPilot YAML task file.
@@ -217,8 +220,8 @@ def _sky_launch(
         idle_minutes_to_autostop: Minutes of idleness before auto-stopping.
             Combined with down=True, the VM tears down after this many idle
             minutes. If None, SkyPilot uses its default (1 minute).
-        stream: If True, stream logs and wait for the run to complete.
-                If False, return after provisioning + setup (don't wait for run).
+        stream: If True, stream logs to stdout (for interactive use).
+                If False, suppress output (for background launches).
 
     Returns True on success.
     """
@@ -232,35 +235,40 @@ def _sky_launch(
     logger.info(f"Launching cluster: {cluster_name} from {yaml_path}")
 
     try:
-        import sky
+        # Build the sky launch command
+        cmd = ['sky', 'launch', '-c', cluster_name, yaml_path]
 
-        # Load the task from YAML
-        task = sky.Task.from_yaml(yaml_path)
+        if down:
+            cmd.append('--down')
 
-        # Set environment variables on the task
-        task.update_envs(envs)
-
-        # Launch the task
-        launch_kwargs = dict(
-            task=task,
-            cluster_name=cluster_name,
-            down=down,
-        )
         if idle_minutes_to_autostop is not None:
-            launch_kwargs['idle_minutes_to_autostop'] = idle_minutes_to_autostop
+            cmd.extend(['-i', str(idle_minutes_to_autostop)])
 
-        request_id = sky.launch(**launch_kwargs)
+        # Add environment variables
+        for key, value in envs.items():
+            cmd.extend(['--env', f'{key}={value}'])
 
+        # Always use -y to skip confirmation prompts
+        cmd.append('-y')
+
+        # Run the command
         if stream:
-            # Stream logs to stdout for interactive use (e.g., test_launch).
-            # follow=True streams provisioning logs but hits fileno errors
-            # in SSH/cron contexts, so only use for interactive sessions.
-            sky.stream_and_get(request_id, follow=True)
+            # Stream output to stdout for interactive use
+            result = subprocess.run(cmd, check=False)
         else:
-            # For background launches, use follow=False to avoid fileno errors.
-            # follow=False returns None immediately (fire-and-forget), which is
-            # fine for background launches — we don't need to wait for completion.
-            sky.stream_and_get(request_id, follow=False)
+            # Suppress output for background launches
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False
+            )
+
+        if result.returncode != 0:
+            error_msg = result.stderr if not stream and result.stderr else "see logs above"
+            logger.error(f"sky launch failed with exit code {result.returncode}: {error_msg}")
+            return False
 
         logger.info(f"Successfully launched: {cluster_name}")
         return True
