@@ -196,7 +196,7 @@ All configuration is done via the `.env` file or environment variables. CLI argu
 | `GITLAB_URL` | No | `https://git.genesisrnd.com` | GitLab server URL |
 | `MAX_WORKERS` | No | `5` | Maximum concurrent GPU workers |
 | `JOBS_PER_WORKER` | No | `4` | Number of jobs per worker (for scaling formula) |
-| `INIT_TIMEOUT` | No | `300` | Seconds before tearing down stuck INIT clusters |
+| `INIT_TIMEOUT` | No | `1800` | Seconds before tearing down stuck INIT clusters |
 | `WORKER_YAML` | No | `skypilot_worker.yaml` | Path to the SkyPilot worker task file |
 | `LOG_FILE` | No | `monitor.log` | Path to the log file |
 
@@ -269,7 +269,7 @@ On each monitoring cycle, the monitor cleans up invalid workers:
 | Cluster State | Action |
 |---------------|--------|
 | **STOPPED** | Tear down immediately (`sky down`) — not doing work, may incur storage costs |
-| **INIT** (stale) | Tear down if stuck longer than `INIT_TIMEOUT` (default 5 min) — likely failed to provision |
+| **INIT** (stale) | Tear down if stuck longer than `INIT_TIMEOUT` (default 30 min) — likely failed to provision |
 | **UP** (running) | Leave alone — let drain-and-exit handle natural termination |
 | **UP** (0 jobs needed) | Leave alone — don't proactively kill running workers |
 
@@ -397,7 +397,7 @@ Run `sky check` and follow the instructions to configure your cloud provider. Fo
 
 ### Workers stuck in INIT state
 
-The monitor will automatically tear down clusters stuck in INIT for longer than `INIT_TIMEOUT` (default 5 minutes). If this happens frequently, the cloud provider may be having capacity issues — try a different region or GPU type.
+The monitor will automatically tear down clusters stuck in INIT for longer than `INIT_TIMEOUT` (default 30 minutes). If this happens frequently, the cloud provider may be having capacity issues — try a different region or GPU type.
 
 ### Too many workers launching
 

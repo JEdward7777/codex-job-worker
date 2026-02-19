@@ -355,7 +355,7 @@ class Monitor:
             gitlab_url: GitLab server URL (default: from .env or https://git.genesisrnd.com).
             max_workers: Maximum concurrent workers (default: from .env or 5).
             jobs_per_worker: Jobs per worker ratio (default: from .env or 4).
-            init_timeout: Seconds before tearing down stale INIT clusters (default: from .env or 300).
+            init_timeout: Seconds before tearing down stale INIT clusters (default: from .env or 1800).
             worker_yaml: Path to SkyPilot worker YAML (default: from .env or skypilot_worker.yaml).
             log_file: Path to log file (default: from .env or monitor.log).
             verbose: Enable verbose GitLab scanning output.
@@ -369,7 +369,7 @@ class Monitor:
         gitlab_url = gitlab_url or os.environ.get('GITLAB_URL', 'https://git.genesisrnd.com')
         max_workers = max_workers if max_workers is not None else int(os.environ.get('MAX_WORKERS', '5'))
         jobs_per_worker = jobs_per_worker if jobs_per_worker is not None else int(os.environ.get('JOBS_PER_WORKER', '4'))
-        init_timeout = init_timeout if init_timeout is not None else int(os.environ.get('INIT_TIMEOUT', '300'))
+        init_timeout = init_timeout if init_timeout is not None else int(os.environ.get('INIT_TIMEOUT', '1800'))
         worker_yaml = worker_yaml or os.environ.get('WORKER_YAML', 'skypilot_worker.yaml')
         log_file = log_file or os.environ.get('LOG_FILE', 'monitor.log')
 
