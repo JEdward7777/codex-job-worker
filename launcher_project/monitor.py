@@ -184,8 +184,10 @@ def _sky_down(cluster_name: str, logger: logging.Logger) -> bool:
         import sky
         logger.info(f"Tearing down cluster: {cluster_name}")
         request_id = sky.down(cluster_name)
-        sky.get(request_id)
-        logger.info(f"Successfully tore down: {cluster_name}")
+        # Use follow=False to avoid fileno errors in SSH/cron contexts.
+        # Returns None immediately (fire-and-forget), which is fine.
+        sky.stream_and_get(request_id, follow=False)
+        logger.info(f"Tear down initiated: {cluster_name}")
         return True
     except Exception as e:
         logger.error(f"Failed to tear down {cluster_name}: {e}")
@@ -251,12 +253,14 @@ def _sky_launch(
 
         if stream:
             # Stream logs to stdout for interactive use (e.g., test_launch).
-            # stream_and_get with follow=True streams provisioning logs.
+            # follow=True streams provisioning logs but hits fileno errors
+            # in SSH/cron contexts, so only use for interactive sessions.
             sky.stream_and_get(request_id, follow=True)
         else:
-            # For background launches, just wait for the result without streaming.
-            # sky.get() avoids the fileno issue that stream_and_get has.
-            sky.get(request_id)
+            # For background launches, use follow=False to avoid fileno errors.
+            # follow=False returns None immediately (fire-and-forget), which is
+            # fine for background launches — we don't need to wait for completion.
+            sky.stream_and_get(request_id, follow=False)
 
         logger.info(f"Successfully launched: {cluster_name}")
         return True
