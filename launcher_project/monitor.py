@@ -132,15 +132,25 @@ def _get_sky_clusters(logger: logging.Logger) -> List[Dict[str, Any]]:
     Get all SkyPilot clusters matching our worker prefix.
 
     Returns a list of dicts with keys: name, status, launched_at, status_updated_at
+
+    Uses AUTO refresh mode to query the cloud provider for accurate status.
+    Falls back to NONE (cached) if AUTO fails with the Vast.ai fileno bug.
     """
     try:
         import sky
-        # Use NONE refresh mode — AUTO/FORCE trigger a cloud provider query
-        # that fails with "fileno" error on Vast.ai in the API server context.
-        # NONE returns cached status, which is sufficient because SkyPilot
-        # updates the cache whenever we launch or tear down clusters.
-        request_id = sky.status(refresh=sky.StatusRefreshMode.NONE)
-        clusters = sky.get(request_id)
+
+        # Try AUTO first — queries the cloud for accurate status.
+        # This detects VMs that crashed or were preempted by the provider.
+        try:
+            request_id = sky.status(refresh=sky.StatusRefreshMode.AUTO)
+            clusters = sky.get(request_id)
+        except Exception as auto_err:
+            # AUTO fails with "fileno" error on Vast.ai in the API server
+            # context. Fall back to NONE (cached status from local DB).
+            logger.warning(f"sky.status(AUTO) failed ({auto_err}), "
+                           f"falling back to cached status")
+            request_id = sky.status(refresh=sky.StatusRefreshMode.NONE)
+            clusters = sky.get(request_id)
     except Exception as e:
         logger.error(f"Failed to get sky status: {e}")
         return []
