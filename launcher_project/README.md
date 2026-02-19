@@ -403,9 +403,17 @@ The monitor will automatically tear down clusters stuck in INIT for longer than 
 
 Reduce `MAX_WORKERS` in your `.env` file. The default is 5.
 
-### Cron not running
+### Cron not running or SkyPilot fails from cron
+
+Cron runs with a minimal environment (`PATH=/usr/bin:/bin`, no `~/.bashrc`). The `run_monitor_cron.sh` script sources `~/.bashrc` or `~/.profile` to get the full environment, but if you still have issues:
 
 1. Check cron logs: `grep CRON /var/log/syslog`
 2. Verify the crontab entry: `crontab -l`
 3. Make sure the paths in the crontab are absolute
 4. Check `/var/log/monitor_cron.log` for output
+5. Verify cloud credentials are available: if your cloud API key (e.g., `VAST_API_KEY`) is set in `~/.bashrc`, make sure `~/.bashrc` doesn't exit early for non-interactive shells (some default `.bashrc` files have `[ -z "$PS1" ] && return` at the top)
+6. Test the cron environment manually:
+   ```bash
+   env -i HOME=$HOME LOGNAME=$USER PATH=/usr/bin:/bin SHELL=/bin/sh \
+     bash /path/to/launcher_project/run_monitor_cron.sh --dry-run
+   ```

@@ -49,8 +49,27 @@ main() {
     # Ensure we're in the script's directory (launcher_project/)
     cd "$(dirname "$0")"
 
-    # Make sure uv is on the PATH
-    export PATH="$HOME/.local/bin:$PATH"
+    # --- Set up environment for cron ---
+    # Cron runs with a minimal environment (just HOME, LOGNAME, PATH=/usr/bin:/bin).
+    # We need the user's full environment for:
+    #   - uv, sky, git on PATH
+    #   - Cloud credential env vars (e.g., VAST_API_KEY)
+    #   - SSH agent for SkyPilot VM access
+    #   - Any other tools SkyPilot depends on (rsync, ssh, etc.)
+    #
+    # Source the user's profile to get the full interactive environment.
+    # The -l flag on bash would do this, but we use explicit sourcing for clarity.
+    if [ -f "$HOME/.bashrc" ]; then
+        # shellcheck disable=SC1091
+        source "$HOME/.bashrc"
+    elif [ -f "$HOME/.profile" ]; then
+        # shellcheck disable=SC1091
+        source "$HOME/.profile"
+    fi
+
+    # Ensure uv and locally-installed tools are on PATH (may already be set
+    # by .bashrc, but this guarantees it even if .bashrc is minimal)
+    export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
     # --- Git pull to pick up code updates ---
     # Go to the repo root (parent of launcher_project/)
