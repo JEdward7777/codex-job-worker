@@ -185,6 +185,7 @@ def _sky_launch(
     logger: logging.Logger,
     dry_run: bool = False,
     down: bool = True,
+    idle_minutes_to_autostop: Optional[int] = None,
     stream: bool = False,
 ) -> bool:
     """
@@ -197,6 +198,9 @@ def _sky_launch(
         logger: Logger instance.
         dry_run: If True, log what would happen but don't launch.
         down: If True, auto-terminate VM when the run script exits.
+        idle_minutes_to_autostop: Minutes of idleness before auto-stopping.
+            Combined with down=True, the VM tears down after this many idle
+            minutes. If None, SkyPilot uses its default (1 minute).
         stream: If True, stream logs and wait for the run to complete.
                 If False, return after provisioning + setup (don't wait for run).
 
@@ -204,7 +208,9 @@ def _sky_launch(
     """
     if dry_run:
         logger.info(f"[DRY RUN] Would launch cluster '{cluster_name}' "
-                     f"from {yaml_path} (down={down}, envs={list(envs.keys())})")
+                     f"from {yaml_path} (down={down}, "
+                     f"idle_minutes_to_autostop={idle_minutes_to_autostop}, "
+                     f"envs={list(envs.keys())})")
         return True
 
     logger.info(f"Launching cluster: {cluster_name} from {yaml_path}")
@@ -219,11 +225,15 @@ def _sky_launch(
         task.update_envs(envs)
 
         # Launch the task
-        request_id = sky.launch(
-            task,
+        launch_kwargs = dict(
+            task=task,
             cluster_name=cluster_name,
             down=down,
         )
+        if idle_minutes_to_autostop is not None:
+            launch_kwargs['idle_minutes_to_autostop'] = idle_minutes_to_autostop
+
+        request_id = sky.launch(**launch_kwargs)
 
         # stream_and_get waits for provisioning + setup + run
         # With follow=True (default), it streams logs to stdout
@@ -339,10 +349,12 @@ class Monitor:
         gitlab_token: Optional[str] = None,
         gitlab_url: Optional[str] = None,
         max_workers: Optional[int] = None,
+        min_workers: Optional[int] = None,
         jobs_per_worker: Optional[int] = None,
         init_timeout: Optional[int] = None,
         worker_yaml: Optional[str] = None,
         log_file: Optional[str] = None,
+        idle_minutes: Optional[int] = None,
         verbose: bool = False,
     ):
         """
@@ -354,10 +366,18 @@ class Monitor:
             gitlab_token: GitLab access token (default: from .env or GITLAB_TOKEN env var).
             gitlab_url: GitLab server URL (default: from .env or https://git.genesisrnd.com).
             max_workers: Maximum concurrent workers (default: from .env or 5).
+            min_workers: Minimum workers to keep running even with 0 jobs (default: 0).
+                         Useful for testing worker detection. Workers launched to meet
+                         the minimum use idle_minutes auto-teardown instead of immediate
+                         exit, so they stay alive long enough for the next cycle to see them.
             jobs_per_worker: Jobs per worker ratio (default: from .env or 4).
             init_timeout: Seconds before tearing down stale INIT clusters (default: from .env or 1800).
             worker_yaml: Path to SkyPilot worker YAML (default: from .env or skypilot_worker.yaml).
             log_file: Path to log file (default: from .env or monitor.log).
+            idle_minutes: Minutes of idle time before auto-teardown (default: from
+                          .env or 7). Passed to SkyPilot as idle_minutes_to_autostop.
+                          Combined with --down, the VM tears down after being idle
+                          for this many minutes. If not set, SkyPilot uses its default.
             verbose: Enable verbose GitLab scanning output.
         """
         # Load .env file (does not override existing env vars)
@@ -368,17 +388,20 @@ class Monitor:
         gitlab_token = gitlab_token or os.environ.get('GITLAB_TOKEN')
         gitlab_url = gitlab_url or os.environ.get('GITLAB_URL', 'https://git.genesisrnd.com')
         max_workers = max_workers if max_workers is not None else int(os.environ.get('MAX_WORKERS', '5'))
+        min_workers = min_workers if min_workers is not None else int(os.environ.get('MIN_WORKERS', '0'))
         jobs_per_worker = jobs_per_worker if jobs_per_worker is not None else int(os.environ.get('JOBS_PER_WORKER', '4'))
         init_timeout = init_timeout if init_timeout is not None else int(os.environ.get('INIT_TIMEOUT', '1800'))
         worker_yaml = worker_yaml or os.environ.get('WORKER_YAML', 'skypilot_worker.yaml')
         log_file = log_file or os.environ.get('LOG_FILE', 'monitor.log')
+        idle_minutes = idle_minutes if idle_minutes is not None else int(os.environ.get('IDLE_MINUTES', '1'))
 
         # Setup logging
         logger = setup_logging(log_file)
 
         mode_label = "[DRY RUN] " if dry_run else ""
         logger.info(f"{mode_label}=== Monitor cycle starting ===")
-        logger.info(f"{mode_label}Config: max_workers={max_workers}, jobs_per_worker={jobs_per_worker}, "
+        logger.info(f"{mode_label}Config: max_workers={max_workers}, min_workers={min_workers}, "
+                     f"jobs_per_worker={jobs_per_worker}, idle_minutes={idle_minutes}, "
                      f"init_timeout={init_timeout}s, worker_yaml={worker_yaml}")
 
         # --- Preflight checks ---
@@ -425,6 +448,11 @@ class Monitor:
             desired_workers = 0
         else:
             desired_workers = min(math.ceil(active_jobs / jobs_per_worker), max_workers)
+
+        # Apply minimum workers floor
+        if min_workers > 0 and desired_workers < min_workers:
+            logger.info(f"Applying min_workers floor: {desired_workers} -> {min_workers}")
+            desired_workers = min_workers
 
         logger.info(f"Active jobs: {active_jobs}, desired workers: {desired_workers}")
 
@@ -525,6 +553,7 @@ class Monitor:
                     logger=logger,
                     dry_run=dry_run,
                     down=True,
+                    idle_minutes_to_autostop=idle_minutes,
                     stream=False,  # Don't block — launch and move on
                 )
                 if not success:
