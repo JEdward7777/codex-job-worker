@@ -125,6 +125,18 @@ export WORKER_ID=gpu-worker-1
 sky launch skypilot_worker.yaml --env GITLAB_TOKEN --env WORKER_ID
 ```
 
+### Auto-Scaling Monitor
+
+For production use, the **monitor process** automatically scales workers based on job demand. It runs on a cheap VM (no GPU) and launches/tears down SkyPilot workers as needed.
+
+```bash
+cd launcher_project
+cp .env.template .env   # Fill in your GITLAB_TOKEN
+bash run_monitor_cron.sh
+```
+
+See [launcher_project/README.md](launcher_project/README.md) for full documentation.
+
 ### Secret Management
 
 **Important**: Never commit secrets to the repository. Use one of these methods:
@@ -298,7 +310,14 @@ audio_text_tests/
 ├── preprocess_stabletts.py      # Data preprocessing for TTS
 ├── preprocess_audio.py          # Audio preprocessing (silence trimming)
 ├── StableTTS/                   # StableTTS model (submodule)
-└── finetune-hf-vits/            # VITS fine-tuning (submodule)
+├── finetune-hf-vits/            # VITS fine-tuning (submodule)
+└── launcher_project/            # Monitor process & SkyPilot launcher
+    ├── monitor.py               # Auto-scaling monitor (no GPU needed)
+    ├── run_monitor_cron.sh       # Cron-friendly bash wrapper
+    ├── skypilot_worker.yaml     # Drain-and-exit worker task
+    ├── skypilot_worker_polling.yaml  # Persistent polling worker task
+    ├── skypilot_force_job.yaml  # Force-run a specific job
+    └── .env.template            # Environment variable template
 ```
 
 ## Standalone Tools
@@ -358,6 +377,7 @@ dataset:
 
 ## Related Documentation
 
+- [launcher_project/README.md](launcher_project/README.md) - **Monitor process & SkyPilot launcher** — auto-scales GPU workers based on job demand
 - [WORKER_IMPLEMENTATION_PLAN.md](WORKER_IMPLEMENTATION_PLAN.md) - Detailed architecture and implementation plan
 - [TRAINING_INSTRUCTIONS.md](TRAINING_INSTRUCTIONS.md) - Manual training instructions
 - [TTS_FINETUNING_README.md](TTS_FINETUNING_README.md) - TTS fine-tuning guide

@@ -1,7 +1,12 @@
 # Secrets - NEVER commit these
 .env
 .env.*
+!.env.template
 *.secrets
+
+# Log files
+monitor.log
+monitor.log.*
 
 # uv lock file (regenerated on sync)
 uv.lock

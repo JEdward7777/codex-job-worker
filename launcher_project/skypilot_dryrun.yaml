@@ -15,7 +15,8 @@ name: codex-dryrun
 
 resources:
   cloud: vast
-  accelerators: RTX3060:1
+  accelerators: RTX3090:1
+  disk_size: 50  # Only need minimal disk for dryrun
 
 num_nodes: 1
 
@@ -83,12 +84,6 @@ run: |
   echo "=========================================="
   echo "DRY RUN COMPLETE - GitLab connectivity verified!"
   echo "=========================================="
-  echo ""
-  echo "Machine will stay running for exploration"
-  echo "SSH in with: sky ssh codex-dryrun"
-  echo ""
-  echo "Sleeping indefinitely... (Ctrl+C to stop, or sky down codex-dryrun)"
-  sleep infinity
 
 envs:
   WORK_DIR: "/tmp/gpu_work"
