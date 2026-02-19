@@ -135,10 +135,12 @@ def _get_sky_clusters(logger: logging.Logger) -> List[Dict[str, Any]]:
     """
     try:
         import sky
-        request_id = sky.status(refresh=sky.StatusRefreshMode.AUTO)
-        # follow=True is required — follow=False returns None immediately
-        # without waiting for the API server to produce the result.
-        clusters = sky.stream_and_get(request_id, follow=True)
+        # Use NONE refresh mode — AUTO/FORCE trigger a cloud provider query
+        # that fails with "fileno" error on Vast.ai in the API server context.
+        # NONE returns cached status, which is sufficient because SkyPilot
+        # updates the cache whenever we launch or tear down clusters.
+        request_id = sky.status(refresh=sky.StatusRefreshMode.NONE)
+        clusters = sky.get(request_id)
     except Exception as e:
         logger.error(f"Failed to get sky status: {e}")
         return []
@@ -172,9 +174,7 @@ def _sky_down(cluster_name: str, logger: logging.Logger) -> bool:
         import sky
         logger.info(f"Tearing down cluster: {cluster_name}")
         request_id = sky.down(cluster_name)
-        # follow=True is required — follow=False returns immediately
-        # without waiting for the teardown to complete.
-        sky.stream_and_get(request_id, follow=True)
+        sky.get(request_id)
         logger.info(f"Successfully tore down: {cluster_name}")
         return True
     except Exception as e:
@@ -239,11 +239,14 @@ def _sky_launch(
 
         request_id = sky.launch(**launch_kwargs)
 
-        # stream_and_get processes the request and returns the result.
-        # With follow=True, it streams logs to stdout (for interactive use).
-        # With follow=False, it returns immediately — use only when you
-        # don't need the result (fire-and-forget launch).
-        sky.stream_and_get(request_id, follow=stream)
+        if stream:
+            # Stream logs to stdout for interactive use (e.g., test_launch).
+            # stream_and_get with follow=True streams provisioning logs.
+            sky.stream_and_get(request_id, follow=True)
+        else:
+            # For background launches, just wait for the result without streaming.
+            # sky.get() avoids the fileno issue that stream_and_get has.
+            sky.get(request_id)
 
         logger.info(f"Successfully launched: {cluster_name}")
         return True
