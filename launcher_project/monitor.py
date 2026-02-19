@@ -136,7 +136,9 @@ def _get_sky_clusters(logger: logging.Logger) -> List[Dict[str, Any]]:
     try:
         import sky
         request_id = sky.status(refresh=sky.StatusRefreshMode.AUTO)
-        clusters = sky.stream_and_get(request_id, follow=False)
+        # follow=True is required — follow=False returns None immediately
+        # without waiting for the API server to produce the result.
+        clusters = sky.stream_and_get(request_id, follow=True)
     except Exception as e:
         logger.error(f"Failed to get sky status: {e}")
         return []
@@ -170,7 +172,9 @@ def _sky_down(cluster_name: str, logger: logging.Logger) -> bool:
         import sky
         logger.info(f"Tearing down cluster: {cluster_name}")
         request_id = sky.down(cluster_name)
-        sky.stream_and_get(request_id, follow=False)
+        # follow=True is required — follow=False returns immediately
+        # without waiting for the teardown to complete.
+        sky.stream_and_get(request_id, follow=True)
         logger.info(f"Successfully tore down: {cluster_name}")
         return True
     except Exception as e:
@@ -235,9 +239,10 @@ def _sky_launch(
 
         request_id = sky.launch(**launch_kwargs)
 
-        # stream_and_get waits for provisioning + setup + run
-        # With follow=True (default), it streams logs to stdout
-        # With follow=False, it waits silently
+        # stream_and_get processes the request and returns the result.
+        # With follow=True, it streams logs to stdout (for interactive use).
+        # With follow=False, it returns immediately — use only when you
+        # don't need the result (fire-and-forget launch).
         sky.stream_and_get(request_id, follow=stream)
 
         logger.info(f"Successfully launched: {cluster_name}")
