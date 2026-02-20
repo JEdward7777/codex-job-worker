@@ -5,9 +5,13 @@ Monitor Process — Auto-scaling GPU Worker Manager
 This script runs a single monitoring cycle:
   1. Scans GitLab for active jobs (pending + running)
   2. Calculates how many workers are needed: ceil(active_jobs / JOBS_PER_WORKER)
-  3. Checks how many SkyPilot workers are currently running
+  3. Checks how many workers are currently running (via cloud provider)
   4. Launches new workers if more are needed (up to MAX_WORKERS)
-  5. Cleans up workers in invalid states (STOPPED, stale INIT)
+  5. Cleans up workers in invalid states (stopped, stale init)
+
+Supports multiple cloud providers via the CloudProvider interface:
+  - vast: Direct Vast.ai REST API for listing, SkyPilot for launch/destroy
+  - skypilot: Pure SkyPilot (original implementation)
 
 Designed to be run via cron (e.g., every 10 minutes). If the process crashes,
 cron simply runs it again next cycle — no long-running daemon to babysit.
@@ -16,7 +20,7 @@ Usage:
     # Single monitoring cycle (for cron)
     uv run python monitor.py run
 
-    # Dry run — verify GitLab scanning and SkyPilot connectivity
+    # Dry run — verify GitLab scanning and cloud provider connectivity
     uv run python monitor.py run --dry-run
 
     # Override settings
@@ -25,7 +29,7 @@ Usage:
     # Show current status without taking action
     uv run python monitor.py status
 
-    # Test SkyPilot with a lightweight dryrun VM
+    # Test launch with a lightweight dryrun VM
     uv run python monitor.py test_launch --dry-run
 
     # Test full worker pipeline (launches real worker, scans for jobs, exits)
@@ -36,25 +40,25 @@ Cron example (every 10 minutes):
 """
 
 import gzip
-import io
 import logging
 import logging.handlers
 import math
 import os
 import shutil
-import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import List, Optional
 
-import fire
-from dotenv import load_dotenv
+import fire  # pylint: disable=import-error
+from dotenv import load_dotenv  # pylint: disable=import-error
 
 # Add parent directory to path so we can import gitlab_jobs
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-from gitlab_jobs import GitLabJobScanner  # noqa: E402
+from gitlab_jobs import GitLabJobScanner  # noqa: E402  # pylint: disable=import-error
+
+from cloud_provider import CloudProvider, InstanceInfo  # noqa: E402  # pylint: disable=import-error
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -124,202 +128,46 @@ def setup_logging(log_file: str = 'monitor.log') -> logging.Logger:
 
 
 # ---------------------------------------------------------------------------
-# SkyPilot helpers
+# Provider factory
 # ---------------------------------------------------------------------------
 
-def _get_sky_clusters(logger: logging.Logger) -> List[Dict[str, Any]]:
-    """
-    Get all SkyPilot clusters matching our worker prefix.
-
-    Returns a list of dicts with keys: name, status, launched_at, status_updated_at
-
-    Uses AUTO refresh mode to query the cloud provider for accurate status.
-    Falls back to NONE (cached) if AUTO fails with the Vast.ai fileno bug.
-    """
-    try:
-        import sky
-
-        # Try AUTO first — queries the cloud for accurate status.
-        # This detects VMs that crashed or were preempted by the provider.
-        try:
-            request_id = sky.status(refresh=sky.StatusRefreshMode.AUTO)
-            clusters = sky.get(request_id)
-        except Exception as auto_err:
-            # AUTO fails with "fileno" error on Vast.ai in the API server
-            # context. Fall back to NONE (cached status from local DB).
-            logger.warning(f"sky.status(AUTO) failed ({auto_err}), "
-                           f"falling back to cached status")
-            request_id = sky.status(refresh=sky.StatusRefreshMode.NONE)
-            clusters = sky.get(request_id)
-    except Exception as e:
-        logger.error(f"Failed to get sky status: {e}")
-        return []
-
-    if not clusters:
-        return []
-
-    our_clusters = []
-    for cluster in clusters:
-        name = cluster.name if hasattr(cluster, 'name') else cluster.get('name', '')
-        if name.startswith(WORKER_PREFIX):
-            status = cluster.status if hasattr(cluster, 'status') else cluster.get('status')
-            launched_at = (cluster.launched_at if hasattr(cluster, 'launched_at')
-                          else cluster.get('launched_at'))
-            status_updated_at = (cluster.status_updated_at
-                                 if hasattr(cluster, 'status_updated_at')
-                                 else cluster.get('status_updated_at'))
-            our_clusters.append({
-                'name': name,
-                'status': status,
-                'launched_at': launched_at,
-                'status_updated_at': status_updated_at,
-            })
-
-    return our_clusters
-
-
-def _sky_down(cluster_name: str, logger: logging.Logger) -> bool:
-    """Tear down a SkyPilot cluster. Returns True on success."""
-    try:
-        import sky
-        logger.info(f"Tearing down cluster: {cluster_name}")
-        request_id = sky.down(cluster_name)
-        # Use follow=False to avoid fileno errors in SSH/cron contexts.
-        # Returns None immediately (fire-and-forget), which is fine.
-        sky.stream_and_get(request_id, follow=False)
-        logger.info(f"Tear down initiated: {cluster_name}")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to tear down {cluster_name}: {e}")
-        return False
-
-
-def _sky_launch(
-    yaml_path: str,
-    cluster_name: str,
-    envs: Dict[str, str],
+def _create_provider(
+    cloud_provider: str,
     logger: logging.Logger,
-    dry_run: bool = False,
-    down: bool = True,
-    idle_minutes_to_autostop: Optional[int] = None,
-    stream: bool = False,
-) -> bool:
+) -> CloudProvider:
     """
-    Launch a SkyPilot cluster using the CLI (subprocess).
-
-    The Python API hits fileno errors in SSH/cron contexts, so we use
-    the CLI which works reliably.
+    Create a cloud provider instance based on the CLOUD_PROVIDER setting.
 
     Args:
-        yaml_path: Path to the SkyPilot YAML task file.
-        cluster_name: Name for the SkyPilot cluster.
-        envs: Environment variables to set on the task.
+        cloud_provider: Provider name — 'vast' or 'skypilot'.
         logger: Logger instance.
-        dry_run: If True, log what would happen but don't launch.
-        down: If True, auto-terminate VM when the run script exits.
-        idle_minutes_to_autostop: Minutes of idleness before auto-stopping.
-            Combined with down=True, the VM tears down after this many idle
-            minutes. If None, SkyPilot uses its default (1 minute).
-        stream: If True, stream logs to stdout (for interactive use).
-                If False, suppress output (for background launches).
 
-    Returns True on success.
+    Returns:
+        A CloudProvider implementation.
     """
-    if dry_run:
-        logger.info(f"[DRY RUN] Would launch cluster '{cluster_name}' "
-                     f"from {yaml_path} (down={down}, "
-                     f"idle_minutes_to_autostop={idle_minutes_to_autostop}, "
-                     f"envs={list(envs.keys())})")
-        return True
+    if cloud_provider == 'vast':
+        from vast_provider import VastCloudProvider
 
-    logger.info(f"Launching cluster: {cluster_name} from {yaml_path}")
-
-    try:
-        # Build the sky launch command
-        cmd = ['sky', 'launch', '-c', cluster_name, yaml_path]
-
-        if down:
-            cmd.append('--down')
-
-        if idle_minutes_to_autostop is not None:
-            cmd.extend(['-i', str(idle_minutes_to_autostop)])
-
-        # Add environment variables
-        for key, value in envs.items():
-            cmd.extend(['--env', f'{key}={value}'])
-
-        # Always use -y to skip confirmation prompts
-        cmd.append('-y')
-
-        # Run the command
-        if stream:
-            # Stream output to stdout for interactive use
-            result = subprocess.run(cmd, check=False)
-        else:
-            # Suppress output for background launches
-            result = subprocess.run(
-                cmd,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                check=False
-            )
-
-        if result.returncode != 0:
-            error_msg = result.stderr if not stream and result.stderr else "see logs above"
-            logger.error(f"sky launch failed with exit code {result.returncode}: {error_msg}")
-            return False
-
-        logger.info(f"Successfully launched: {cluster_name}")
-        return True
-
-    except Exception as e:
-        logger.error(f"Failed to launch {cluster_name}: {e}")
-        return False
-
-
-def _check_skypilot_configured(logger: logging.Logger) -> bool:
-    """
-    Verify that SkyPilot is installed and cloud credentials are configured.
-
-    Returns True if at least one cloud is enabled.
-    """
-    try:
-        result = subprocess.run(
-            ['sky', 'check'],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        # sky check returns 0 even if some clouds fail, as long as it runs
-        if result.returncode != 0:
+        api_key = os.environ.get('VAST_API_KEY')
+        if not api_key:
             logger.error(
-                "SkyPilot check failed. Please run 'sky check' and configure "
-                "your cloud credentials.\n"
-                "See: https://skypilot.readthedocs.io/en/latest/getting-started/installation.html"
+                "VAST_API_KEY not set. Required when CLOUD_PROVIDER=vast.\n"
+                "Set it in launcher_project/.env or as an environment variable."
             )
-            return False
+            sys.exit(1)
 
-        # Check if at least one cloud is enabled
-        output = result.stdout + result.stderr
-        if 'enabled' not in output.lower():
-            logger.error(
-                "No cloud providers enabled in SkyPilot. Please run 'sky check' "
-                "and configure at least one cloud provider.\n"
-                "For Vast.ai: https://vast.ai/article/vast-ai-gpus-can-now-be-rentend-through-skypilot"
-            )
-            return False
+        return VastCloudProvider(api_key=api_key, logger=logger)
 
-        return True
-    except FileNotFoundError:
+    elif cloud_provider == 'skypilot':
+        from skypilot_provider import SkyPilotProvider
+        return SkyPilotProvider(logger=logger)
+
+    else:
         logger.error(
-            "SkyPilot CLI not found. Install it with: pip install 'skypilot[vast]'\n"
-            "Or: uv add 'skypilot[vast]'"
+            f"Unknown CLOUD_PROVIDER: '{cloud_provider}'. "
+            f"Supported values: 'vast', 'skypilot'"
         )
-        return False
-    except Exception as e:
-        logger.error(f"Error checking SkyPilot: {e}")
-        return False
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -364,12 +212,13 @@ def count_active_jobs(scanner: GitLabJobScanner, logger: logging.Logger) -> int:
 
 class Monitor:
     """
-    GPU Worker Monitor — auto-scales SkyPilot workers based on job demand.
+    GPU Worker Monitor — auto-scales workers based on job demand.
 
+    Supports multiple cloud providers via the CloudProvider interface.
     Designed to be run as a single cycle via cron. Each invocation:
     1. Scans GitLab for active jobs
     2. Calculates desired worker count
-    3. Cleans up invalid clusters
+    3. Cleans up invalid instances
     4. Launches new workers if needed
     """
 
@@ -385,6 +234,7 @@ class Monitor:
         worker_yaml: Optional[str] = None,
         log_file: Optional[str] = None,
         idle_minutes: Optional[int] = None,
+        cloud_provider: Optional[str] = None,
         verbose: bool = False,
     ):
         """
@@ -392,7 +242,7 @@ class Monitor:
 
         Args:
             dry_run: If True, scan jobs and check status but don't launch or
-                     tear down any clusters. Logs what would happen.
+                     tear down any instances. Logs what would happen.
             gitlab_token: GitLab access token (default: from .env or GITLAB_TOKEN env var).
             gitlab_url: GitLab server URL (default: from .env or https://git.genesisrnd.com).
             max_workers: Maximum concurrent workers (default: from .env or 5).
@@ -401,13 +251,15 @@ class Monitor:
                          the minimum use idle_minutes auto-teardown instead of immediate
                          exit, so they stay alive long enough for the next cycle to see them.
             jobs_per_worker: Jobs per worker ratio (default: from .env or 4).
-            init_timeout: Seconds before tearing down stale INIT clusters (default: from .env or 1800).
+            init_timeout: Seconds before tearing down stale INIT instances (default: from .env or 1800).
             worker_yaml: Path to SkyPilot worker YAML (default: from .env or skypilot_worker.yaml).
             log_file: Path to log file (default: from .env or monitor.log).
             idle_minutes: Minutes of idle time before auto-teardown (default: from
                           .env or 7). Passed to SkyPilot as idle_minutes_to_autostop.
                           Combined with --down, the VM tears down after being idle
                           for this many minutes. If not set, SkyPilot uses its default.
+            cloud_provider: Cloud provider to use — 'vast' or 'skypilot'
+                            (default: from .env or 'vast').
             verbose: Enable verbose GitLab scanning output.
         """
         # Load .env file (does not override existing env vars)
@@ -424,13 +276,15 @@ class Monitor:
         worker_yaml = worker_yaml or os.environ.get('WORKER_YAML', 'skypilot_worker.yaml')
         log_file = log_file or os.environ.get('LOG_FILE', 'monitor.log')
         idle_minutes = idle_minutes if idle_minutes is not None else int(os.environ.get('IDLE_MINUTES', '1'))
+        cloud_provider = cloud_provider or os.environ.get('CLOUD_PROVIDER', 'vast')
 
         # Setup logging
         logger = setup_logging(log_file)
 
         mode_label = "[DRY RUN] " if dry_run else ""
         logger.info(f"{mode_label}=== Monitor cycle starting ===")
-        logger.info(f"{mode_label}Config: max_workers={max_workers}, min_workers={min_workers}, "
+        logger.info(f"{mode_label}Config: cloud_provider={cloud_provider}, "
+                     f"max_workers={max_workers}, min_workers={min_workers}, "
                      f"jobs_per_worker={jobs_per_worker}, idle_minutes={idle_minutes}, "
                      f"init_timeout={init_timeout}s, worker_yaml={worker_yaml}")
 
@@ -452,8 +306,11 @@ class Monitor:
             logger.error(f"Worker YAML not found: {worker_yaml_path}")
             sys.exit(1)
 
+        # Create cloud provider
+        provider = _create_provider(cloud_provider, logger)
+
         if not dry_run:
-            if not _check_skypilot_configured(logger):
+            if not provider.check_configured():
                 sys.exit(1)
 
         # --- Step 1: Scan GitLab for active jobs ---
@@ -486,80 +343,68 @@ class Monitor:
 
         logger.info(f"Active jobs: {active_jobs}, desired workers: {desired_workers}")
 
-        # --- Step 3: Get current cluster status ---
+        # --- Step 3: Get current instance status ---
 
-        logger.info("Checking SkyPilot cluster status...")
-        clusters = _get_sky_clusters(logger)
-        logger.info(f"Found {len(clusters)} codex-worker-* clusters")
+        logger.info(f"Checking {cloud_provider} instance status...")
+        instances = provider.list_instances(prefix=WORKER_PREFIX)
+        logger.info(f"Found {len(instances)} {WORKER_PREFIX}* instances")
 
-        for c in clusters:
-            logger.debug(f"  {c['name']}: status={c['status']}, "
-                         f"launched_at={c.get('launched_at')}, "
-                         f"status_updated_at={c.get('status_updated_at')}")
+        for inst in instances:
+            logger.debug(f"  {inst.name}: status={inst.status}, "
+                         f"gpu={inst.gpu_name}, created_at={inst.created_at}, "
+                         f"cost=${inst.cost_per_hour:.3f}/hr")
 
-        # --- Step 4: Clean up invalid clusters ---
+        # --- Step 4: Clean up invalid instances ---
 
-        import sky
         now = datetime.now(timezone.utc)
+        torn_down_names: set = set()
 
-        # Tear down STOPPED clusters
-        stopped = [c for c in clusters if c['status'] == sky.ClusterStatus.STOPPED]
-        for c in stopped:
-            logger.info(f"Cluster {c['name']} is STOPPED — tearing down")
+        # Tear down stopped instances
+        stopped = [inst for inst in instances if inst.status == 'stopped']
+        for inst in stopped:
+            logger.info(f"Instance {inst.name} ({inst.id}) is stopped — tearing down")
             if not dry_run:
-                _sky_down(c['name'], logger)
+                provider.destroy_instance(inst.id)
             else:
-                logger.info(f"[DRY RUN] Would tear down STOPPED cluster: {c['name']}")
+                logger.info(f"[DRY RUN] Would tear down stopped instance: {inst.name}")
+            torn_down_names.add(inst.name)
 
-        # Tear down stale INIT clusters
-        init_clusters = [c for c in clusters if c['status'] == sky.ClusterStatus.INIT]
-        for c in init_clusters:
-            updated_at = c.get('status_updated_at')
-            if updated_at is not None:
-                # status_updated_at might be a timestamp (int/float) or datetime
-                if isinstance(updated_at, (int, float)):
-                    age_seconds = (now - datetime.fromtimestamp(updated_at, tz=timezone.utc)).total_seconds()
-                elif isinstance(updated_at, datetime):
-                    if updated_at.tzinfo is None:
-                        updated_at = updated_at.replace(tzinfo=timezone.utc)
-                    age_seconds = (now - updated_at).total_seconds()
-                else:
-                    age_seconds = 0  # Can't determine age, skip
+        # Tear down error instances
+        errored = [inst for inst in instances if inst.status == 'error']
+        for inst in errored:
+            logger.info(f"Instance {inst.name} ({inst.id}) is in error state — tearing down")
+            if not dry_run:
+                provider.destroy_instance(inst.id)
+            else:
+                logger.info(f"[DRY RUN] Would tear down errored instance: {inst.name}")
+            torn_down_names.add(inst.name)
+
+        # Tear down stale init instances
+        init_instances = [inst for inst in instances if inst.status == 'init']
+        for inst in init_instances:
+            if inst.created_at is not None:
+                created_at = inst.created_at
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(tzinfo=timezone.utc)
+                age_seconds = (now - created_at).total_seconds()
 
                 if age_seconds > init_timeout:
                     logger.info(
-                        f"Cluster {c['name']} stuck in INIT for {age_seconds:.0f}s "
-                        f"(>{init_timeout}s) — tearing down"
+                        f"Instance {inst.name} ({inst.id}) stuck in init for "
+                        f"{age_seconds:.0f}s (>{init_timeout}s) — tearing down"
                     )
                     if not dry_run:
-                        _sky_down(c['name'], logger)
+                        provider.destroy_instance(inst.id)
                     else:
-                        logger.info(f"[DRY RUN] Would tear down stale INIT cluster: {c['name']}")
+                        logger.info(f"[DRY RUN] Would tear down stale init instance: {inst.name}")
+                    torn_down_names.add(inst.name)
 
         # --- Step 5: Count healthy running workers ---
 
-        # Re-fetch after cleanup (or just filter the original list)
-        healthy_statuses = {sky.ClusterStatus.INIT, sky.ClusterStatus.UP}
-        # Exclude clusters we just tore down
-        torn_down_names = {c['name'] for c in stopped}
-        # Also exclude stale INIT clusters we tore down
-        for c in init_clusters:
-            updated_at = c.get('status_updated_at')
-            if updated_at is not None:
-                if isinstance(updated_at, (int, float)):
-                    age_seconds = (now - datetime.fromtimestamp(updated_at, tz=timezone.utc)).total_seconds()
-                elif isinstance(updated_at, datetime):
-                    if updated_at.tzinfo is None:
-                        updated_at = updated_at.replace(tzinfo=timezone.utc)
-                    age_seconds = (now - updated_at).total_seconds()
-                else:
-                    age_seconds = 0
-                if age_seconds > init_timeout:
-                    torn_down_names.add(c['name'])
-
+        healthy_statuses = {'running', 'init'}
         current_workers = sum(
-            1 for c in clusters
-            if c['status'] in healthy_statuses and c['name'] not in torn_down_names
+            1 for inst in instances
+            if inst.status in healthy_statuses and inst.name not in torn_down_names
         )
 
         logger.info(f"Current healthy workers: {current_workers}, desired: {desired_workers}")
@@ -573,20 +418,26 @@ class Monitor:
             for i in range(workers_to_launch):
                 short_uuid = uuid.uuid4().hex[:8]
                 cluster_name = f"{WORKER_PREFIX}{short_uuid}"
-                success = _sky_launch(
+
+                if dry_run:
+                    logger.info(
+                        f"[DRY RUN] Would launch worker '{cluster_name}' "
+                        f"from {worker_yaml_path} (idle_minutes={idle_minutes})"
+                    )
+                    continue
+
+                result = provider.launch_instance(
+                    name=cluster_name,
                     yaml_path=str(worker_yaml_path),
-                    cluster_name=cluster_name,
                     envs={
                         'GITLAB_TOKEN': gitlab_token,
                         'WORKER_ID': cluster_name,
                     },
-                    logger=logger,
-                    dry_run=dry_run,
                     down=True,
                     idle_minutes_to_autostop=idle_minutes,
                     stream=False,  # Don't block — launch and move on
                 )
-                if not success:
+                if result is None:
                     logger.warning(f"Failed to launch worker {i+1}/{workers_to_launch}, stopping launches")
                     break
         else:
@@ -606,6 +457,7 @@ class Monitor:
         gitlab_token: Optional[str] = None,
         gitlab_url: Optional[str] = None,
         log_file: Optional[str] = None,
+        cloud_provider: Optional[str] = None,
         verbose: bool = False,
     ):
         """
@@ -620,6 +472,7 @@ class Monitor:
         gitlab_token = gitlab_token or os.environ.get('GITLAB_TOKEN')
         gitlab_url = gitlab_url or os.environ.get('GITLAB_URL', 'https://git.genesisrnd.com')
         log_file = log_file or os.environ.get('LOG_FILE', 'monitor.log')
+        cloud_provider = cloud_provider or os.environ.get('CLOUD_PROVIDER', 'vast')
 
         logger = setup_logging(log_file)
 
@@ -637,17 +490,20 @@ class Monitor:
         )
         active_jobs = count_active_jobs(scanner, logger)
 
-        # Get clusters
-        logger.info("Checking SkyPilot clusters...")
-        clusters = _get_sky_clusters(logger)
+        # Get instances
+        provider = _create_provider(cloud_provider, logger)
+        logger.info(f"Checking {cloud_provider} instances...")
+        instances = provider.list_instances(prefix=WORKER_PREFIX)
 
         print(f"\n{'='*60}")
-        print(f"Monitor Status Report")
+        print(f"Monitor Status Report (provider: {cloud_provider})")
         print(f"{'='*60}")
         print(f"Active jobs (pending + running): {active_jobs}")
-        print(f"Worker clusters (codex-worker-*): {len(clusters)}")
-        for c in clusters:
-            print(f"  {c['name']}: {c['status']}")
+        print(f"Worker instances ({WORKER_PREFIX}*): {len(instances)}")
+        for inst in instances:
+            gpu_info = f" [{inst.gpu_name}]" if inst.gpu_name else ""
+            cost_info = f" ${inst.cost_per_hour:.3f}/hr" if inst.cost_per_hour else ""
+            print(f"  {inst.name}: {inst.status}{gpu_info}{cost_info}")
         print(f"{'='*60}\n")
 
 
@@ -658,15 +514,16 @@ class Monitor:
         gitlab_url: Optional[str] = None,
         worker_yaml: Optional[str] = None,
         log_file: Optional[str] = None,
+        cloud_provider: Optional[str] = None,
         keep_alive: bool = False,
         verbose: bool = False,
     ):
         """
-        Test SkyPilot by launching a VM.
+        Test the cloud provider by launching a VM.
 
         Without --dry-run, this launches the actual worker YAML
         (skypilot_worker.yaml) with --down. The worker will:
-        1. Provision a GPU VM on Vast.ai
+        1. Provision a GPU VM on the configured cloud provider
         2. Clone the repo, install dependencies
         3. Scan GitLab for jobs, process any it finds
         4. Auto-terminate when no more jobs are available
@@ -676,7 +533,7 @@ class Monitor:
 
         With --dry-run, this launches skypilot_dryrun.yaml instead — a
         lightweight YAML that just echoes a message and exits. This only
-        tests that SkyPilot can provision a VM on Vast.ai.
+        tests that the cloud provider can provision a VM.
 
         Use --keep-alive to keep the VM alive after it finishes (useful
         for SSH exploration; you must manually tear it down).
@@ -688,6 +545,8 @@ class Monitor:
             gitlab_url: GitLab server URL.
             worker_yaml: Path to worker YAML (default: from .env or skypilot_worker.yaml).
             log_file: Path to log file.
+            cloud_provider: Cloud provider to use — 'vast' or 'skypilot'
+                            (default: from .env or 'vast').
             keep_alive: If True, launch without --down (VM stays alive).
                         If False (default), auto-terminate when done.
             verbose: Enable verbose output.
@@ -699,6 +558,7 @@ class Monitor:
         gitlab_token = gitlab_token or os.environ.get('GITLAB_TOKEN')
         gitlab_url = gitlab_url or os.environ.get('GITLAB_URL', 'https://git.genesisrnd.com')
         log_file = log_file or os.environ.get('LOG_FILE', 'monitor.log')
+        cloud_provider = cloud_provider or os.environ.get('CLOUD_PROVIDER', 'vast')
 
         logger = setup_logging(log_file)
 
@@ -706,8 +566,9 @@ class Monitor:
             logger.error("GITLAB_TOKEN not set.")
             sys.exit(1)
 
-        # Check SkyPilot is configured
-        if not _check_skypilot_configured(logger):
+        # Create provider and check configuration
+        provider = _create_provider(cloud_provider, logger)
+        if not provider.check_configured():
             sys.exit(1)
 
         script_dir = Path(__file__).parent
@@ -733,31 +594,29 @@ class Monitor:
 
         if keep_alive:
             logger.info(f"Launching test VM: {mode_desc} (keep-alive — no --down)")
-            logger.info("NOTE: VM will stay alive! Tear down with: sky down codex-test-launch")
+            logger.info("NOTE: VM will stay alive! Tear down manually.")
         else:
             logger.info(f"Launching test VM: {mode_desc} (with --down)")
             logger.info("VM will auto-terminate when done")
 
         logger.info(f"Using YAML: {yaml_file}")
+        logger.info(f"Cloud provider: {cloud_provider}")
 
         envs = {'GITLAB_TOKEN': gitlab_token}
         if not dry_run:
             envs['WORKER_ID'] = cluster_name
 
-        success = _sky_launch(
+        result = provider.launch_instance(
+            name=cluster_name,
             yaml_path=str(yaml_file),
-            cluster_name=cluster_name,
             envs=envs,
-            logger=logger,
-            dry_run=False,
             down=use_down,
             stream=True,  # Stream logs so user can see the output
         )
 
-        if success:
+        if result is not None:
             logger.info("Test launch completed successfully!")
             if keep_alive:
-                logger.info(f"SSH in with: sky ssh {cluster_name}")
                 logger.info(f"Tear down with: sky down {cluster_name}")
             else:
                 logger.info("VM should auto-terminate shortly (--down mode)")
