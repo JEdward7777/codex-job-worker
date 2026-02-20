@@ -129,7 +129,7 @@ class SkyPilotProvider(CloudProvider):
         The Python API hits fileno errors in SSH/cron contexts, so we
         use the CLI which works reliably.
 
-        When stream=False (the default for monitor cycles), uses --detach
+        When stream=False (the default for monitor cycles), uses --detach-run
         so that sky launch returns immediately after submitting the job
         to the SkyPilot API server. The provisioning continues in the
         background. This prevents the monitor from blocking for 5-10

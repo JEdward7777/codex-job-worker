@@ -14,6 +14,10 @@ Usage:
     # Create a file in a repository
     python gitlab_jobs.py create_file --token=YOUR_TOKEN --project-id=123 --file-path=test.txt --content="Hello World"
     python gitlab_jobs.py create_file --token=YOUR_TOKEN --project-id=123 --file-path=config.yaml --file-source=./local-config.yaml
+
+    # Unshare a project (remove yourself as a member)
+    python gitlab_jobs.py unshare_project --token=YOUR_TOKEN --project-id=123
+    python gitlab_jobs.py unshare_project --token=YOUR_TOKEN --project-id=123 --user-id=551
 """
 
 import os
@@ -26,7 +30,7 @@ from typing import List, Dict, Any, Optional, Iterator
 import fire
 import yaml
 import gitlab
-from gitlab.exceptions import GitlabError, GitlabAuthenticationError, GitlabGetError, GitlabCreateError, GitlabUpdateError
+from gitlab.exceptions import GitlabError, GitlabAuthenticationError, GitlabGetError, GitlabCreateError, GitlabUpdateError, GitlabDeleteError
 
 
 # Constants for retry logic
@@ -912,6 +916,126 @@ class GitLabJobScanner:
 
         # If we get here, no jobs were successfully claimed
         raise NoJobsAvailableError("Failed to claim any available jobs")
+
+    @retry_with_backoff()
+    def _remove_project_member(
+        self,
+        project_id: int,
+        user_id: int
+    ) -> Dict[str, Any]:
+        """
+        Remove a user from a project's member list.
+
+        This is the internal method that performs the actual member removal
+        via the GitLab Members API (DELETE /projects/:id/members/:user_id).
+
+        Args:
+            project_id: GitLab project ID
+            user_id: User ID to remove from the project
+
+        Returns:
+            Dictionary containing:
+            - project_id: The project ID
+            - user_id: The removed user's ID
+            - project_path: The project's path with namespace
+
+        Raises:
+            GitlabDeleteError: If the removal fails (e.g., user is not a member)
+            GitlabGetError: If project not found or other API errors
+            ValueError: If attempting to remove the project owner
+        """
+        # Get the project
+        project = self.gl.projects.get(project_id)
+
+        # Safety check: prevent removing the project owner
+        if hasattr(project, 'owner') and project.owner:
+            owner_id = project.owner.get('id') if isinstance(project.owner, dict) else getattr(project.owner, 'id', None)
+            if owner_id == user_id:
+                raise ValueError(
+                    f"Cannot remove user {user_id} from project {project_id}: "
+                    f"user is the project owner"
+                )
+
+        # Also check creator_id as a fallback ownership indicator
+        if hasattr(project, 'creator_id') and project.creator_id == user_id:
+            raise ValueError(
+                f"Cannot remove user {user_id} from project {project_id}: "
+                f"user is the project creator"
+            )
+
+        self._log(
+            f"Removing user {user_id} from project {project_id} "
+            f"({project.path_with_namespace})"
+        )
+
+        # Remove the member via the Members API
+        project.members.delete(user_id)
+
+        self._log(f"Successfully removed user {user_id} from project {project_id}")
+
+        return {
+            'project_id': project_id,
+            'user_id': user_id,
+            'project_path': project.path_with_namespace
+        }
+
+    def unshare_project(
+        self,
+        project_id: int,
+        user_id: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Remove a user from a project's member list (unshare).
+
+        By default, removes the currently authenticated user from the project.
+        This is used by the GPU worker to remove itself from projects after
+        completing jobs, reducing security exposure and speeding up job scanning.
+
+        Includes a safety check to prevent accidentally removing the project
+        owner/creator.
+
+        Args:
+            project_id: GitLab project ID
+            user_id: User ID to remove. Defaults to the currently authenticated user.
+
+        Returns:
+            Dictionary containing:
+            - project_id: The project ID
+            - user_id: The removed user's ID
+            - project_path: The project's path with namespace
+
+        Raises:
+            ValueError: If attempting to remove the project owner/creator
+            GitlabDeleteError: If the removal fails
+            GitlabGetError: If project not found or other API errors
+
+        Examples:
+            # Remove yourself from a project
+            python gitlab_jobs.py unshare_project --token=YOUR_TOKEN --project-id=123
+
+            # Remove a specific user from a project
+            python gitlab_jobs.py unshare_project --token=YOUR_TOKEN --project-id=123 --user-id=551
+        """
+        # Default to the currently authenticated user
+        if user_id is None:
+            user_id = self.gl.user.id
+            self._log(f"No user_id specified, using current user: {user_id} ({self.gl.user.username})")
+
+        # Perform the removal
+        result = self._remove_project_member(
+            project_id=project_id,
+            user_id=user_id
+        )
+
+        # Log success
+        self._log(
+            f"Project unshared successfully:\n"
+            f"  Project: {result['project_id']} ({result['project_path']})\n"
+            f"  Removed user: {result['user_id']}",
+            force=True
+        )
+
+        return result
 
 
 def main():
