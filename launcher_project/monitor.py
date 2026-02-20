@@ -354,6 +354,7 @@ def cleanup_stale_projects(
     """
     now = datetime.now(timezone.utc)
     stale_data = _load_stale_projects(stale_file)
+    stale_data_dirty = False
 
     # Build set of currently visible project IDs
     visible_project_ids = {str(p['project_id']) for p in all_projects}
@@ -365,6 +366,8 @@ def cleanup_stale_projects(
     for pid in stale_keys_to_remove:
         logger.debug(f"Removing stale tracker entry for project {pid} (no longer visible)")
         del stale_data[pid]
+        stale_data_dirty = True
+
 
     # Process each visible project
     unshared_count = 0
@@ -379,11 +382,13 @@ def cleanup_stale_projects(
             if project_id in stale_data:
                 logger.debug(f"Project {project_path} has actionable jobs — removing from stale tracker")
                 del stale_data[project_id]
+                stale_data_dirty = True
         else:
             # Project is unactionable
             if project_id not in stale_data:
                 # First time seeing this project as unactionable — record timestamp
                 stale_data[project_id] = now.isoformat()
+                stale_data_dirty = True
                 logger.info(f"Project {project_path} has no actionable jobs — starting stale timer")
             else:
                 # Already tracked — check if it's been long enough
@@ -396,6 +401,7 @@ def cleanup_stale_projects(
                 except (ValueError, TypeError):
                     # Invalid timestamp — reset it
                     stale_data[project_id] = now.isoformat()
+                    stale_data_dirty = True
                     hours_stale = 0
 
                 if hours_stale >= unshare_hours:
@@ -424,9 +430,11 @@ def cleanup_stale_projects(
 
         # Remove from stale tracker regardless (either unshared or will retry next cycle)
         stale_data.pop(str(project_id), None)
+        stale_data_dirty = True
 
     # Save updated tracking data
-    _save_stale_projects(stale_file, stale_data)
+    if stale_data_dirty:
+        _save_stale_projects(stale_file, stale_data)
 
     return unshared_count
 
