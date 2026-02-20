@@ -8,6 +8,9 @@
 monitor.log
 monitor.log.*
 
+# Stale project tracking (runtime state)
+stale_projects.json
+
 # uv lock file (regenerated on sync)
 uv.lock
 

@@ -40,6 +40,7 @@ Cron example (every 10 minutes):
 """
 
 import gzip
+import json
 import logging
 import logging.handlers
 import math
@@ -49,7 +50,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import fire  # pylint: disable=import-error
 from dotenv import load_dotenv  # pylint: disable=import-error
@@ -174,7 +175,11 @@ def _create_provider(
 # Job counting
 # ---------------------------------------------------------------------------
 
-def count_active_jobs(scanner: GitLabJobScanner, logger: logging.Logger) -> int:
+def count_active_jobs(
+    scanner: GitLabJobScanner,
+    logger: logging.Logger,
+    all_projects: Optional[List[Dict]] = None,
+) -> int:
     """
     Count jobs that are in pending or running state.
 
@@ -182,11 +187,33 @@ def count_active_jobs(scanner: GitLabJobScanner, logger: logging.Logger) -> int:
 
     Uses list_available_jobs(include_claimed=True) to get both pending and
     running jobs (excluding canceled), then filters out completed and failed.
+
+    Args:
+        scanner: GitLabJobScanner instance.
+        logger: Logger instance.
+        all_projects: Optional pre-scanned project data from scanner.scan_all_projects().
+                      If provided, jobs are extracted from this data instead of
+                      re-scanning GitLab. If None, scanner.list_available_jobs() is called.
+
+    Returns:
+        Number of active (pending or running) jobs.
     """
     try:
-        # include_claimed=True returns both unclaimed (pending) and claimed jobs
-        # It already excludes canceled jobs
-        all_jobs = scanner.list_available_jobs(include_claimed=True)
+        if all_projects is not None:
+            # Extract jobs from pre-scanned project data
+            all_jobs = []
+            for project in all_projects:
+                if not project.get('jobs'):
+                    continue
+                for job in project['jobs']:
+                    # Exclude canceled jobs (same as list_available_jobs)
+                    if job.get('canceled') is True:
+                        continue
+                    all_jobs.append(job)
+        else:
+            # include_claimed=True returns both unclaimed (pending) and claimed jobs
+            # It already excludes canceled jobs
+            all_jobs = scanner.list_available_jobs(include_claimed=True)
     except Exception as e:
         logger.error(f"Failed to scan GitLab for jobs: {e}")
         return 0
@@ -204,6 +231,204 @@ def count_active_jobs(scanner: GitLabJobScanner, logger: logging.Logger) -> int:
 
     logger.info(f"Found {active_count} active jobs ({len(all_jobs)} total non-canceled)")
     return active_count
+
+
+# ---------------------------------------------------------------------------
+# Stale project tracking
+# ---------------------------------------------------------------------------
+
+DEFAULT_STALE_PROJECTS_FILE = 'stale_projects.json'
+DEFAULT_PROJECT_UNSHARE_HOURS = 24
+
+
+def _load_stale_projects(file_path: str) -> Dict[str, str]:
+    """
+    Load the stale projects tracking file.
+
+    The file maps project_id (as string) -> ISO timestamp of when the project
+    was first observed as unactionable.
+
+    Args:
+        file_path: Path to the JSON tracking file.
+
+    Returns:
+        Dictionary mapping project_id strings to ISO timestamp strings.
+        Returns empty dict if file doesn't exist or is invalid.
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _save_stale_projects(file_path: str, data: Dict[str, str]) -> None:
+    """
+    Save the stale projects tracking file.
+
+    Args:
+        file_path: Path to the JSON tracking file.
+        data: Dictionary mapping project_id strings to ISO timestamp strings.
+    """
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+
+
+def _has_actionable_jobs(project_data: Dict) -> bool:
+    """
+    Check if a project has any actionable jobs (unclaimed or running).
+
+    A job is actionable if:
+    - It is not canceled AND
+    - It is either unclaimed (pending) OR claimed with state 'running'
+
+    Args:
+        project_data: Project dict from scanner.scan_all_projects().
+
+    Returns:
+        True if the project has at least one actionable job.
+    """
+    jobs = project_data.get('jobs')
+    if not jobs:
+        return False
+
+    for job in jobs:
+        # Skip canceled jobs
+        if job.get('canceled') is True:
+            continue
+
+        # Unclaimed job = actionable (pending)
+        if not job.get('is_claimed'):
+            return True
+
+        # Claimed job — check response state
+        response = job.get('response')
+        if response and isinstance(response, dict):
+            state = response.get('state', '')
+            if state not in ('completed', 'failed', 'canceled'):
+                # Still running or in some active state
+                return True
+        else:
+            # Claimed but no parseable response — treat as actionable
+            return True
+
+    return False
+
+
+def cleanup_stale_projects(
+    scanner: GitLabJobScanner,
+    all_projects: List[Dict],
+    stale_file: str,
+    unshare_hours: float,
+    logger: logging.Logger,
+    dry_run: bool = False,
+) -> int:
+    """
+    Track and clean up stale shared projects.
+
+    This function:
+    1. Loads the stale projects tracking file
+    2. For each visible project, checks if it has actionable jobs
+    3. If actionable: removes it from the stale tracker (resets timer)
+    4. If unactionable: adds it to the tracker with current timestamp
+       (or keeps existing timestamp if already tracked)
+    5. If a project has been unactionable for longer than unshare_hours:
+       unshares it (removes the worker from the project)
+    6. Removes entries for projects that are no longer visible
+       (handles manual unshares and prevents JSON accumulation)
+    7. Saves the updated tracking file
+
+    Args:
+        scanner: GitLabJobScanner instance (for calling unshare_project).
+        all_projects: Pre-scanned project data from scanner.scan_all_projects().
+        stale_file: Path to the stale projects JSON tracking file.
+        unshare_hours: Hours a project must be unactionable before unsharing.
+        logger: Logger instance.
+        dry_run: If True, log what would happen but don't unshare.
+
+    Returns:
+        Number of projects unshared in this cycle.
+    """
+    now = datetime.now(timezone.utc)
+    stale_data = _load_stale_projects(stale_file)
+
+    # Build set of currently visible project IDs
+    visible_project_ids = {str(p['project_id']) for p in all_projects}
+
+    # Remove entries for projects no longer visible (manual unshare, etc.)
+    stale_keys_to_remove = [
+        pid for pid in stale_data if pid not in visible_project_ids
+    ]
+    for pid in stale_keys_to_remove:
+        logger.debug(f"Removing stale tracker entry for project {pid} (no longer visible)")
+        del stale_data[pid]
+
+    # Process each visible project
+    unshared_count = 0
+    projects_to_unshare = []
+
+    for project_data in all_projects:
+        project_id = str(project_data['project_id'])
+        project_path = project_data.get('project_path', project_id)
+
+        if _has_actionable_jobs(project_data):
+            # Project is actionable — remove from stale tracker
+            if project_id in stale_data:
+                logger.debug(f"Project {project_path} has actionable jobs — removing from stale tracker")
+                del stale_data[project_id]
+        else:
+            # Project is unactionable
+            if project_id not in stale_data:
+                # First time seeing this project as unactionable — record timestamp
+                stale_data[project_id] = now.isoformat()
+                logger.info(f"Project {project_path} has no actionable jobs — starting stale timer")
+            else:
+                # Already tracked — check if it's been long enough
+                first_seen_str = stale_data[project_id]
+                try:
+                    first_seen = datetime.fromisoformat(first_seen_str)
+                    if first_seen.tzinfo is None:
+                        first_seen = first_seen.replace(tzinfo=timezone.utc)
+                    hours_stale = (now - first_seen).total_seconds() / 3600
+                except (ValueError, TypeError):
+                    # Invalid timestamp — reset it
+                    stale_data[project_id] = now.isoformat()
+                    hours_stale = 0
+
+                if hours_stale >= unshare_hours:
+                    projects_to_unshare.append((project_data, hours_stale))
+
+    # Unshare stale projects
+    for project_data, hours_stale in projects_to_unshare:
+        project_id = project_data['project_id']
+        project_path = project_data.get('project_path', str(project_id))
+
+        if dry_run:
+            logger.info(
+                f"[DRY RUN] Would unshare project {project_path} (ID: {project_id}) "
+                f"— stale for {hours_stale:.1f} hours (threshold: {unshare_hours}h)"
+            )
+        else:
+            try:
+                scanner.unshare_project(project_id=project_id)
+                logger.info(
+                    f"Unshared project {project_path} (ID: {project_id}) "
+                    f"— stale for {hours_stale:.1f} hours"
+                )
+                unshared_count += 1
+            except Exception as e:
+                logger.error(f"Failed to unshare project {project_path} (ID: {project_id}): {e}")
+
+        # Remove from stale tracker regardless (either unshared or will retry next cycle)
+        stale_data.pop(str(project_id), None)
+
+    # Save updated tracking data
+    _save_stale_projects(stale_file, stale_data)
+
+    return unshared_count
 
 
 # ---------------------------------------------------------------------------
@@ -235,6 +460,8 @@ class Monitor:
         log_file: Optional[str] = None,
         idle_minutes: Optional[int] = None,
         cloud_provider: Optional[str] = None,
+        project_unshare_hours: Optional[float] = None,
+        stale_projects_file: Optional[str] = None,
         verbose: bool = False,
     ):
         """
@@ -260,6 +487,11 @@ class Monitor:
                           for this many minutes. If not set, SkyPilot uses its default.
             cloud_provider: Cloud provider to use — 'vast' or 'skypilot'
                             (default: from .env or 'vast').
+            project_unshare_hours: Hours a project must have no actionable jobs before
+                                   the worker unshares itself from it (default: from
+                                   .env or 24). Set to 0 to disable stale project cleanup.
+            stale_projects_file: Path to the JSON file tracking stale projects
+                                 (default: from .env or stale_projects.json).
             verbose: Enable verbose GitLab scanning output.
         """
         # Load .env file (does not override existing env vars)
@@ -277,6 +509,13 @@ class Monitor:
         log_file = log_file or os.environ.get('LOG_FILE', 'monitor.log')
         idle_minutes = idle_minutes if idle_minutes is not None else int(os.environ.get('IDLE_MINUTES', '1'))
         cloud_provider = cloud_provider or os.environ.get('CLOUD_PROVIDER', 'vast')
+        project_unshare_hours = (
+            project_unshare_hours if project_unshare_hours is not None
+            else float(os.environ.get('PROJECT_UNSHARE_HOURS', str(DEFAULT_PROJECT_UNSHARE_HOURS)))
+        )
+        stale_projects_file = stale_projects_file or os.environ.get(
+            'STALE_PROJECTS_FILE', DEFAULT_STALE_PROJECTS_FILE
+        )
 
         # Setup logging
         logger = setup_logging(log_file)
@@ -286,7 +525,8 @@ class Monitor:
         logger.info(f"{mode_label}Config: cloud_provider={cloud_provider}, "
                      f"max_workers={max_workers}, min_workers={min_workers}, "
                      f"jobs_per_worker={jobs_per_worker}, idle_minutes={idle_minutes}, "
-                     f"init_timeout={init_timeout}s, worker_yaml={worker_yaml}")
+                     f"init_timeout={init_timeout}s, worker_yaml={worker_yaml}, "
+                     f"project_unshare_hours={project_unshare_hours}h")
 
         # --- Preflight checks ---
 
@@ -313,9 +553,9 @@ class Monitor:
             if not provider.check_configured():
                 sys.exit(1)
 
-        # --- Step 1: Scan GitLab for active jobs ---
+        # --- Step 1: Scan GitLab for all projects and count active jobs ---
 
-        logger.info("Scanning GitLab for active jobs...")
+        logger.info("Scanning GitLab for projects and jobs...")
         try:
             scanner = GitLabJobScanner(
                 token=gitlab_token,
@@ -327,7 +567,27 @@ class Monitor:
             logger.error(f"Failed to connect to GitLab: {e}")
             sys.exit(1)
 
-        active_jobs = count_active_jobs(scanner, logger)
+        # Scan all projects once — reuse for both job counting and stale project tracking
+        all_projects = scanner.scan_all_projects()
+        active_jobs = count_active_jobs(scanner, logger, all_projects=all_projects)
+
+        # --- Step 1b: Clean up stale shared projects ---
+
+        if project_unshare_hours > 0:
+            # Resolve stale_projects_file path relative to this script's directory
+            stale_file_path = str(Path(__file__).parent / stale_projects_file)
+            unshared = cleanup_stale_projects(
+                scanner=scanner,
+                all_projects=all_projects,
+                stale_file=stale_file_path,
+                unshare_hours=project_unshare_hours,
+                logger=logger,
+                dry_run=dry_run,
+            )
+            if unshared > 0:
+                logger.info(f"Unshared {unshared} stale project(s)")
+        else:
+            logger.debug("Stale project cleanup disabled (project_unshare_hours=0)")
 
         # --- Step 2: Calculate desired workers ---
 
@@ -449,7 +709,8 @@ class Monitor:
             f"{mode_label}=== Monitor cycle complete === "
             f"active_jobs={active_jobs} desired={desired_workers} "
             f"current={current_workers} launched={workers_to_launch} "
-            f"cleaned_up={len(torn_down_names)}"
+            f"cleaned_up={len(torn_down_names)} "
+            f"projects_scanned={len(all_projects)}"
         )
 
     def status(
