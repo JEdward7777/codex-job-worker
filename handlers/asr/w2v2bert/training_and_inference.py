@@ -12,12 +12,16 @@ Supports both:
 #pylint: disable=broad-exception-caught
 
 import os
+import sys
 import csv
 import json
 import traceback
 import torch
 from pathlib import Path
 from typing import Dict, Any
+
+# Add parent directory to path for imports
+sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
 # Import all dependencies at module load time to fail early
 from handlers.base import (
@@ -188,7 +192,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             # Extract audio-transcription pairs using downloader method
             # This properly handles isDeleted/isMissing checks and file extensions
             audio_transcriptions = downloader.extract_audio_transcriptions(
-                cells,
+                codex_data,
                 audio_files_map,
             )
 
@@ -201,8 +205,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                 def matches_filter(item, filter_list):
                     verse_id = item.get('verse_id', '')
                     return any(
-                        verse_id == f or  # Exact match
-                        (f in verse_id if ':' in f else False)  # Reference match
+                        verse_id == f  # Exact match only
                         for f in filter_list
                     )
 

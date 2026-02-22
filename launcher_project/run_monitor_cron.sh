@@ -12,6 +12,21 @@
 # If the script crashes, cron simply runs it again next cycle.
 # No long-running daemon to babysit.
 #
+# IMPORTANT — Why this script is structured the way it is:
+#
+#   Bash reads scripts incrementally, not all at once.  If `git pull`
+#   modifies THIS VERY FILE while bash is in the middle of executing it,
+#   the results are undefined — bash might skip lines, re-execute lines,
+#   or read partial commands.
+#
+#   We defend against this with FUNCTION WRAPPING — The entire script
+#   body is inside main().  Bash parses the full function definition
+#   into memory before executing any of it.  Once main() is running,
+#   changes to the file on disk don't affect the in-memory copy.
+#
+#   This means the script is safe even if git pull changes it
+#   mid-execution.
+#
 # Cron example (every 10 minutes):
 #   */10 * * * * cd /path/to/launcher_project && bash run_monitor_cron.sh >> /var/log/monitor_cron.log 2>&1
 #

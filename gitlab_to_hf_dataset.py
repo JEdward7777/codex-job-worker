@@ -23,6 +23,8 @@ import requests
 from requests.adapters import HTTPAdapter
 import fire
 
+import tempfile
+
 from uroman import Uroman
 from gitlab_jobs import DEFAULT_GITLAB_URL
 
@@ -190,13 +192,6 @@ class GitLabDatasetDownloader:
         uroman_config = self.config.get('uroman', {})
         self.uroman_enabled = uroman_config.get('enabled', False)
         self.uroman_language = uroman_config.get('language', None)
-
-        # Validate uroman availability if enabled
-        if self.uroman_enabled:
-            raise ImportError(
-                "uroman is enabled in config but not installed. "
-                "Install it with: uv add uroman"
-            )
 
         # Initialize uroman instance if enabled
         self.uroman_instance = Uroman() if self.uroman_enabled else None
@@ -482,13 +477,18 @@ class GitLabDatasetDownloader:
 
     def download_json_file(self, json_path: str) -> Optional[Dict]:
         """Download and parse a JSON file."""
-        temp_path = self.output_dir / "temp.json"
+        # Use tempfile to avoid dependency on self.output_dir
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix='.json')
+        temp_path = Path(temp_file.name)
+        temp_file.close()
 
-        if self.download_file(json_path, temp_path):
-            with open(temp_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            temp_path.unlink()  # Delete temp file
-            return data
+        try:
+            if self.download_file(json_path, temp_path):
+                with open(temp_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                return data
+        finally:
+            temp_path.unlink(missing_ok=True)
 
         return None
 

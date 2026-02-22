@@ -258,8 +258,12 @@ def transcribe_audio(
         # Get confidence for predicted tokens
         max_probs = torch.max(probs, dim=-1)[0]
 
-        # Average confidence across sequence (excluding padding)
+        # Average confidence across sequence, masking padding if attention_mask available
         confidence = max_probs.mean().item()
+        if 'attention_mask' in inputs:
+            mask = inputs['attention_mask']
+            masked_conf = (max_probs * mask).sum(dim=-1) / mask.sum(dim=-1)
+            confidence = masked_conf.item()
         result["confidence"] = confidence
     else:
         result["confidence"] = None

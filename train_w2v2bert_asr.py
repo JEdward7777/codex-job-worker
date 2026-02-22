@@ -47,8 +47,8 @@ from transformers import (
     Wav2Vec2ForCTC,
     Wav2Vec2BertProcessor,
     Wav2Vec2Processor,
-    Seq2SeqTrainer,
-    Seq2SeqTrainingArguments,
+    Trainer,
+    TrainingArguments,
     TrainerCallback,
     Wav2Vec2CTCTokenizer,
     SeamlessM4TFeatureExtractor,
@@ -618,7 +618,7 @@ def train_w2v2bert_asr_api(
         cer_metric = evaluate.load("cer")
 
         # Training arguments
-        training_args = Seq2SeqTrainingArguments(
+        training_args = TrainingArguments(
             output_dir=output_dir,
             per_device_train_batch_size=per_device_train_batch_size,
             per_device_eval_batch_size=per_device_eval_batch_size,
@@ -654,13 +654,13 @@ def train_w2v2bert_asr_api(
             callbacks.append(HeartbeatCallback(heartbeat_callback))
 
         # Initialize trainer
-        trainer = Seq2SeqTrainer(
+        trainer = Trainer(
             model=model,
             args=training_args,
             train_dataset=dataset_dict["train"],
             eval_dataset=dataset_dict["validation"],
             data_collator=data_collator,
-            tokenizer=processor.feature_extractor, # pylint: disable=no-member
+            tokenizer=processor.tokenizer,
             compute_metrics=lambda pred: compute_metrics(pred, wer_metric, cer_metric, processor),
             callbacks=callbacks,
         )
@@ -904,7 +904,7 @@ def main():
     cer_metric = evaluate.load("cer")
 
     # Training arguments
-    training_args = Seq2SeqTrainingArguments(
+    training_args = TrainingArguments(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
@@ -937,13 +937,13 @@ def main():
         logger.info("Using standard AdamW optimizer")
 
     # Initialize trainer
-    trainer = Seq2SeqTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=dataset_dict["train"],
         eval_dataset=dataset_dict["validation"],
         data_collator=data_collator,
-        tokenizer=processor.feature_extractor, # pylint: disable=no-member
+        tokenizer=processor.tokenizer,
         compute_metrics=lambda pred: compute_metrics(pred, wer_metric, cer_metric, processor),
         callbacks=[BestCheckpointCallback(args.output_dir)],
     )
