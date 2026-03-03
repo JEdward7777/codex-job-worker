@@ -15,11 +15,10 @@ import os
 import sys
 import csv
 import json
-import glob
 import traceback
-import torch
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Sequence
+import torch
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -144,7 +143,6 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         audio_dir.mkdir(parents=True, exist_ok=True)
 
         project_id = job_context['project_id']
-        scanner = callbacks.scanner
 
         # ============================================================
         # PHASE 1: Download and prepare training data
@@ -328,7 +326,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        model, processor, detected_wav2vec2_base = load_model_and_processor(
+        model, processor, _ = load_model_and_processor(
             train_result['final_model_path'],
             device,
             use_wav2vec2_base
@@ -356,7 +354,6 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                     audio_dir=audio_dir,
                     model=model,
                     processor=processor,
-                    detected_wav2vec2_base=detected_wav2vec2_base,
                     device=device,
                     model_output_dir=Path(train_result['final_model_path']),
                     callbacks=callbacks,
@@ -446,7 +443,6 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                     str(local_audio_path),
                     model,
                     processor,
-                    detected_wav2vec2_base,
                     device,
                     return_confidence=True,
                     unk_token_replacement=effective_unk_replacement,
@@ -579,7 +575,6 @@ def _train_transmorgrifier(
     audio_dir: Path,
     model,
     processor,
-    detected_wav2vec2_base: bool,
     device: str,
     model_output_dir: Path,
     callbacks,
@@ -614,7 +609,6 @@ def _train_transmorgrifier(
                 audio_path,
                 model,
                 processor,
-                detected_wav2vec2_base,
                 device,
                 return_confidence=False,
                 unk_token_replacement="*",

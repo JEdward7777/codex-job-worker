@@ -29,13 +29,11 @@ import traceback
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-import numpy as np
 import pandas as pd
 import torch
 from tqdm import tqdm
 from transformers import (
     AutoConfig,
-    AutoModelForCTC,
     AutoProcessor,
     Wav2Vec2BertForCTC,
     Wav2Vec2ForCTC,
@@ -184,7 +182,6 @@ def transcribe_audio(
     audio_path: str,
     model: Union[Wav2Vec2ForCTC, Wav2Vec2BertForCTC],
     processor: Union[Wav2Vec2Processor, Wav2Vec2BertProcessor],
-    use_wav2vec2_base: bool,
     device: str = "cuda",
     return_confidence: bool = False,
     return_alternatives: bool = False,
@@ -198,7 +195,6 @@ def transcribe_audio(
         audio_path: Path to audio file
         model: Loaded ASR model
         processor: Loaded processor
-        use_wav2vec2_base: Whether using traditional Wav2Vec2 architecture
         device: Device for inference
         return_confidence: Whether to return confidence scores
         return_alternatives: Whether to return alternative transcriptions
@@ -306,10 +302,8 @@ def batch_transcribe(
     audio_files: List[str],
     model: Union[Wav2Vec2ForCTC, Wav2Vec2BertForCTC],
     processor: Union[Wav2Vec2Processor, Wav2Vec2BertProcessor],
-    use_wav2vec2_base: bool,
     output_csv_path: str,
     device: str = "cuda",
-    batch_size: int = 1,
     return_confidence: bool = False,
     return_alternatives: bool = False,
     num_alternatives: int = 3,
@@ -322,10 +316,8 @@ def batch_transcribe(
         audio_files: List of audio file paths
         model: Loaded ASR model
         processor: Loaded processor
-        use_wav2vec2_base: Whether using traditional Wav2Vec2 architecture
         output_csv_path: Path where the CSV will be saved (for computing relative paths)
         device: Device for inference
-        batch_size: Batch size for processing (currently only supports 1)
         return_confidence: Whether to return confidence scores
         return_alternatives: Whether to return alternative transcriptions
         num_alternatives: Number of alternatives to return
@@ -346,7 +338,6 @@ def batch_transcribe(
             audio_path,
             model,
             processor,
-            use_wav2vec2_base,
             device,
             return_confidence,
             return_alternatives,
@@ -453,7 +444,7 @@ def inference_w2v2bert_asr_api(
 
         # Load model and processor with architecture detection
         logger.info("Loading model from %s", model_path)
-        model, processor, detected_wav2vec2_base = load_model_and_processor(model_path, device, use_wav2vec2_base)
+        model, processor, _ = load_model_and_processor(model_path, device, use_wav2vec2_base)
 
         if not audio_files:
             result["error_message"] = "No audio files provided"
@@ -480,7 +471,6 @@ def inference_w2v2bert_asr_api(
                 audio_path,
                 model,
                 processor,
-                detected_wav2vec2_base,
                 device,
                 return_confidence,
                 return_alternatives,
@@ -543,6 +533,27 @@ def inference_w2v2bert_asr_api(
 
 
 def main():
+    """
+    CLI entry point for batch ASR inference.
+
+    Parses command-line arguments, loads a fine-tuned Wav2Vec2-BERT (or
+    Wav2Vec2) model, transcribes every audio file found in the given
+    directory, and writes the results to a CSV file.
+
+    Required CLI args:
+        --model_path:  Path to the trained model directory.
+        --audio_dir:   Directory containing audio files to transcribe.
+        --output_csv:  Destination path for the output CSV.
+
+    Optional CLI args include device selection, audio extension filtering,
+    architecture override, confidence / alternative output, UNK-token
+    handling, and an overwrite flag.  Run with ``--help`` for full details.
+
+    Returns:
+        None.  Results are written to *output_csv*; a summary is logged to
+        the console.
+    """
+
     parser = argparse.ArgumentParser(description="Transcribe audio files using W2V2-BERT ASR")
 
     # Required arguments
@@ -554,7 +565,6 @@ def main():
     parser.add_argument(
         "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use for inference"
     )
-    parser.add_argument("--batch_size", type=int, default=1, help="Batch size (currently only 1 supported)")
     parser.add_argument(
         "--audio_extensions",
         type=str,
@@ -619,7 +629,7 @@ def main():
         return
 
     # Load model and processor with architecture detection
-    model, processor, use_wav2vec2_base = load_model_and_processor(args.model_path, args.device, args.use_wav2vec2_base)
+    model, processor, _ = load_model_and_processor(args.model_path, args.device, args.use_wav2vec2_base)
 
     # Get audio files
     audio_files = get_audio_files(args.audio_dir, args.audio_extensions)
@@ -634,10 +644,8 @@ def main():
         audio_files,
         model,
         processor,
-        use_wav2vec2_base,
         args.output_csv,
         args.device,
-        args.batch_size,
         args.return_confidence,
         args.return_alternatives,
         args.num_alternatives,

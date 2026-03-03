@@ -13,10 +13,10 @@ Supports both:
 import os
 import sys
 import csv
-import json
 import traceback
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Sequence
+from handlers.base import extract_tar_archive
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -497,7 +497,6 @@ def _download_checkpoint(
 
         # Check if it's a tar archive and extract it
         if checkpoint_path.endswith(('.pth.tar', '.tar.gz', '.tar')):
-            from handlers.base import extract_tar_archive
             print("    Extracting checkpoint archive...")
             extract_tar_archive(str(local_path), output_dir)
             # Clean up the archive after extraction

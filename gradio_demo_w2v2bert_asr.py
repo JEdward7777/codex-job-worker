@@ -136,7 +136,6 @@ class ASRDemo:
                 audio_path,
                 self.model,
                 self.processor,
-                self.use_wav2vec2_base,
                 self.device,
                 return_confidence=True,
                 return_alternatives=False,
@@ -246,6 +245,41 @@ def create_gradio_interface(asr_demo: ASRDemo) -> gr.Blocks:
 
 
 def main():
+    """
+    Main entry point for the W2V2-BERT ASR Gradio Demo application.
+
+    Parses command-line arguments, validates configuration, initializes the ASR model
+    and processor, creates the Gradio web interface, and launches the server.
+
+    The function performs the following steps:
+    1. Parse and validate command-line arguments
+    2. Check that required paths (model, examples, post-processing model) exist
+    3. Initialize the ASR demo system with the specified model
+    4. Create the Gradio interface with audio input/output components
+    5. Launch the web server on the specified host and port
+
+    Command-line Arguments:
+        --model_path (required): Path to the trained W2V2-BERT or Wav2Vec2 model directory
+        --language: Language name for display in the interface title
+        --examples-dir: Directory containing example audio files to display
+        --max-examples: Maximum number of example files to show (default: 10)
+        --tm_model: Path to SentenceTransmogrifier model for post-processing
+        --device: Device for inference - 'cuda' or 'cpu' (auto-detected by default)
+        --use_wav2vec2_base: Force use of Wav2Vec2 architecture (auto-detected if not set)
+        --share: Create a public Gradio link for sharing
+        --server-port: Port number for the Gradio server (default: 7860)
+        --server-name: Server hostname/IP (default: 0.0.0.0)
+
+    Raises:
+        SystemExit: If required paths don't exist or dependencies are missing
+
+    Example:
+        $ python gradio_demo_w2v2bert_asr.py \\
+            --model_path outputs/w2v2bert_asr/final_model \\
+            --language "English" \\
+            --examples-dir examples/audio \\
+            --share
+    """
     parser = argparse.ArgumentParser(
         description="W2V2-BERT ASR Gradio Demo", formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )

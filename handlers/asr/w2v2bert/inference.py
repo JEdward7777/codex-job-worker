@@ -17,6 +17,7 @@ import json
 import traceback
 from pathlib import Path
 from typing import Dict, Any
+import torch
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -129,7 +130,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print("\nStep 2: Loading ASR model...")
         callbacks.heartbeat(message="Loading ASR model", stage="inference")
 
-        import torch
+
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model, processor, detected_wav2vec2_base = load_model_and_processor(
             local_model_path,
@@ -180,7 +181,6 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         # Process each .codex file
         project_id = job_context['project_id']
-        scanner = callbacks.scanner
 
         # Create downloader for audio and codex file operations
         downloader = GitLabDatasetDownloader(
@@ -274,7 +274,6 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                     str(local_audio_path),
                     model,
                     processor,
-                    detected_wav2vec2_base,
                     device,
                     return_confidence=True,
                     unk_token_replacement=effective_unk_replacement,

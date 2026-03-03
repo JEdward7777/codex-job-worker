@@ -64,7 +64,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
 @dataclass
 class DataCollatorCTCWithPadding:
     """
@@ -98,8 +97,6 @@ class DataCollatorCTCWithPadding:
         batch["labels"] = labels
 
         return batch
-
-
 class TextNormalizer:
     """Handle text normalization with configurable options."""
 
@@ -131,7 +128,6 @@ class TextNormalizer:
 
         return text
 
-
 def detect_language_from_text(texts: List[str]) -> str:
     """Auto-detect language from text samples."""
     sample_text = " ".join(texts[:100])
@@ -149,7 +145,6 @@ def detect_language_from_text(texts: List[str]) -> str:
 
     logger.info("Auto-detected language: %s", lang)
     return lang
-
 
 def load_csv_dataset(
     csv_path: str,
@@ -218,7 +213,6 @@ def load_csv_dataset(
 
     return df
 
-
 def filter_by_duration(
     df: pd.DataFrame,
     max_duration_seconds: Optional[float] = None,
@@ -256,7 +250,6 @@ def filter_by_duration(
     logger.info("Filtered %s samples, %s remaining", original_len - len(df), len(df))
     return df.drop(columns=["duration"])
 
-
 def create_vocab_from_data(texts: List[str]) -> Dict[str, int]:
     """Create vocabulary from text data."""
     vocab_set = set()
@@ -274,7 +267,6 @@ def create_vocab_from_data(texts: List[str]) -> Dict[str, int]:
     logger.info("Sample characters: %s", list(vocab_dict.keys())[:20])
 
     return vocab_dict
-
 
 def prepare_dataset(
     df: pd.DataFrame,
@@ -660,7 +652,7 @@ def train_w2v2bert_asr_api(
             train_dataset=dataset_dict["train"],
             eval_dataset=dataset_dict["validation"],
             data_collator=data_collator,
-            tokenizer=processor.tokenizer,
+            tokenizer=processor.tokenizer, # pylint: disable=no-member
             compute_metrics=lambda pred: compute_metrics(pred, wer_metric, cer_metric, processor),
             callbacks=callbacks,
         )
@@ -723,6 +715,30 @@ def train_w2v2bert_asr_api(
 
 
 def main():
+    """Command-line entry point for W2V2-BERT ASR training.
+
+    Parses command-line arguments, loads and preprocesses the dataset,
+    builds the vocabulary and processor, initializes the model and
+    trainer, then runs the full training loop with evaluation.
+
+    The function performs the following steps:
+        1. Parse CLI arguments for data paths, model config, and training
+           hyperparameters.
+        2. Auto-detect model architecture (Wav2Vec2 vs Wav2Vec2-BERT).
+        3. Load the CSV dataset and optionally filter by audio duration.
+        4. Normalize text and build a character-level vocabulary.
+        5. Create the tokenizer, feature extractor, and processor.
+        6. Load the pretrained model and freeze the feature encoder.
+        7. Prepare train/validation/test splits and extract features.
+        8. Launch HuggingFace Trainer with WER/CER metric evaluation.
+        9. Save the final model and evaluate on the test set.
+
+    Exit codes:
+        0 on success (implicit), non-zero on unhandled exceptions.
+
+    See Also:
+        :func:`train_w2v2bert_asr_api` for the equivalent Python API.
+    """
     parser = argparse.ArgumentParser(description="Train W2V2-BERT ASR model")
 
     # Data arguments
@@ -946,7 +962,7 @@ def main():
         train_dataset=dataset_dict["train"],
         eval_dataset=dataset_dict["validation"],
         data_collator=data_collator,
-        tokenizer=processor.tokenizer,
+        tokenizer=processor.tokenizer, # pylint: disable=no-member
         compute_metrics=lambda pred: compute_metrics(pred, wer_metric, cer_metric, processor),
         callbacks=[BestCheckpointCallback(args.output_dir)],
     )
