@@ -15,10 +15,11 @@ import os
 import sys
 import csv
 import json
+import glob
 import traceback
 import torch
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional, List, Sequence
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -55,9 +56,10 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
     This handler:
     1. Downloads training data from GitLab
     2. Trains the ASR model
-    3. Uses the trained model directly for inference (no upload/download)
-    4. Updates .codex files with transcriptions
-    5. Uploads the trained model to GitLab
+    3. Optionally trains a SentenceTransmorgrifier for post-processing
+    4. Uses the trained model directly for inference (no upload/download)
+    5. Updates .codex files with transcriptions
+    6. Uploads the trained model to GitLab
 
     Args:
         job_context: Job configuration from GitLab manifest
@@ -109,10 +111,12 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         remove_punctuation = text_config.get('remove_punctuation', True)
         remove_numbers = text_config.get('remove_numbers', False)
 
-        # Get SentenceTransmorgrifier config (handler-specific)
+        # Get SentenceTransmorgrifier config
+        # The manifest only has { enabled: boolean }.  When enabled, we train
+        # a new transmorgrifier using the ASR model's own predictions and
+        # bundle the .tm file inside the model archive.
         tm_config = job_context.get('transmorgrifier', {})
-        tm_model_path = tm_config.get('model_path')
-        use_transmorgrifier = tm_config.get('enabled', True) and tm_model_path is not None
+        train_transmorgrifier = tm_config.get('enabled', False)
 
         # Get filter configuration
         # Per spec, training filters under 'training', inference under 'inference'
@@ -129,7 +133,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print(f"  Base model: {base_model}")
         print(f"  Training epochs: {num_epochs}")
         print(f"  Batch size: {batch_size}")
-        print(f"  SentenceTransmorgrifier: {tm_model_path or 'Disabled'}")
+        print(f"  SentenceTransmorgrifier training: {'Enabled' if train_transmorgrifier else 'Disabled'}")
         print()
 
         # Setup directories
@@ -197,10 +201,6 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             )
 
             # Apply include/exclude filtering for training data
-            # Note: For training, we use simple include/exclude semantics (not the
-            # "don't overwrite" semantics used for inference). Training data always
-            # requires both audio AND text, so include_verses just adds to the set
-            # and exclude_verses removes from it.
             if include_verses or exclude_verses:
                 def matches_filter(item, filter_list):
                     verse_id = item.get('verse_id', '')
@@ -215,8 +215,6 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                         if not matches_filter(item, exclude_verses)
                     ]
                 if include_verses:
-                    # For training, include_verses acts as a whitelist
-                    # (only include items that match the filter)
                     audio_transcriptions = [
                         item for item in audio_transcriptions
                         if matches_filter(item, include_verses)
@@ -242,7 +240,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
                 training_samples.append({
                     'file_name': audio_filename,
-                    'transcription': text,
+                    'transcription': text,  # Original un-normalized text from codex
                     'verse_id': cell_ref
                 })
 
@@ -310,6 +308,16 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print(f"\n  Training completed: {train_result['epochs_completed']} epochs")
         print(f"  Final model: {train_result['final_model_path']}")
 
+        # Write training metrics CSV
+        metrics_csv_path = None
+        log_history = train_result.get('log_history')
+        if log_history:
+            metrics_csv_path = _write_training_metrics_csv(
+                log_history, work_dir / "training_metrics.csv"
+            )
+            if metrics_csv_path:
+                print(f"  Training metrics CSV written: {metrics_csv_path}")
+
         # ============================================================
         # PHASE 3: Load trained model for inference
         # ============================================================
@@ -328,22 +336,36 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         print(f"  Loaded model on {device}")
 
-        # Load SentenceTransmorgrifier if configured
+        # ============================================================
+        # PHASE 3b: Train SentenceTransmorgrifier (if enabled)
+        # ============================================================
         transmorgrifier = None
-        if use_transmorgrifier and tm_model_path:
+        if train_transmorgrifier:
+            print("\n" + "=" * 60)
+            print("PHASE 3b: Training SentenceTransmorgrifier")
+            print("=" * 60)
+
             if not TRANSMORGRIFIER_AVAILABLE:
                 print("  Warning: SentenceTransmorgrifier not installed, skipping")
+                print("  Install with: pip install sentence-transmorgrifier")
             else:
-                tm_result = _download_transmorgrifier(
-                    job_context=job_context,
+                callbacks.heartbeat(message="Training SentenceTransmorgrifier", stage="transmorgrifier")
+
+                transmorgrifier = _train_transmorgrifier(
+                    training_samples=training_samples,
+                    audio_dir=audio_dir,
+                    model=model,
+                    processor=processor,
+                    detected_wav2vec2_base=detected_wav2vec2_base,
+                    device=device,
+                    model_output_dir=Path(train_result['final_model_path']),
                     callbacks=callbacks,
-                    tm_path=tm_model_path,
-                    output_dir=work_dir / "transmorgrifier"
                 )
-                if tm_result['success']:
-                    transmorgrifier = Transmorgrifier()
-                    transmorgrifier.load(tm_result['local_path'])
-                    print("  Loaded SentenceTransmorgrifier")
+
+                if transmorgrifier:
+                    print("  SentenceTransmorgrifier trained and saved into model directory")
+                else:
+                    print("  Warning: SentenceTransmorgrifier training failed, continuing without it")
 
         # ============================================================
         # PHASE 4: Transcribe cells needing text
@@ -352,6 +374,16 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print("PHASE 4: Transcribing Cells")
         print("=" * 60)
         callbacks.heartbeat(message="Transcribing cells", stage="inference")
+
+        # Determine UNK replacement strategy:
+        # If transmorgrifier is active, use "*" so it can learn to handle UNK tokens.
+        # Otherwise, fall back to the configured suppress_unk / unk_replacement.
+        if transmorgrifier:
+            effective_unk_replacement = "*"
+        elif suppress_unk:
+            effective_unk_replacement = unk_replacement
+        else:
+            effective_unk_replacement = None
 
         total_transcribed = 0
         total_errors = 0
@@ -417,7 +449,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                     detected_wav2vec2_base,
                     device,
                     return_confidence=True,
-                    unk_token_replacement=unk_replacement if suppress_unk else None,
+                    unk_token_replacement=effective_unk_replacement,
                 )
 
                 if result.get('error'):
@@ -502,13 +534,15 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                     print(f"      Failed: {f['remote_path']}: {f['error']}")
                     total_errors += 1
 
-        # Upload trained model
+        # Upload trained model (the .tm file is already inside the model directory
+        # if transmorgrifier training succeeded, so it gets bundled automatically)
         print("\n  Uploading trained model...")
         upload_result = _upload_model(
             job_context=job_context,
             callbacks=callbacks,
             model_path=train_result['final_model_path'],
-            job_id=job_context['job_id']
+            job_id=job_context['job_id'],
+            metrics_csv_path=str(metrics_csv_path) if metrics_csv_path else None,
         )
 
         if upload_result['success']:
@@ -540,58 +574,156 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         }
 
 
-def _download_transmorgrifier(
-    job_context: Dict[str, Any],
+def _train_transmorgrifier(
+    training_samples: List[Dict[str, str]],
+    audio_dir: Path,
+    model,
+    processor,
+    detected_wav2vec2_base: bool,
+    device: str,
+    model_output_dir: Path,
     callbacks,
-    tm_path: str,
-    output_dir: Path
-) -> Dict[str, Any]:
-    """Download SentenceTransmorgrifier model from GitLab.
+) -> Optional[Any]:
+    """
+    Train a SentenceTransmorgrifier using the ASR model's own predictions.
 
-    Uses GitLabDatasetDownloader.download_file() which automatically handles
-    Git LFS files.
+    1. Run inference on all training audio to get the model's predictions
+    2. Replace [UNK] with * in predictions (from_sentences)
+    3. Use original un-normalized text as to_sentences
+    4. Train the transmorgrifier
+    5. Save the .tm file into the model output directory
+
+    Returns the trained Transmorgrifier instance, or None on failure.
     """
     try:
-        scanner = callbacks.scanner
+        from_sentences = []
+        to_sentences = []
 
-        output_dir.mkdir(parents=True, exist_ok=True)
+        total = len(training_samples)
+        print(f"  Running inference on {total} training samples...")
 
-        downloader = GitLabDatasetDownloader(
-            config_path=None,
-            gitlab_url=scanner.server_url,
-            access_token=scanner.access_token,
-            project_id=str(job_context['project_id']),
+        for i, sample in enumerate(training_samples):
+            audio_path = str(audio_dir / sample['file_name'])
+            original_text = sample['transcription']  # Un-normalized ground truth
+
+            if not os.path.exists(audio_path):
+                continue
+
+            # Run ASR inference with [UNK] → *
+            result = transcribe_audio(
+                audio_path,
+                model,
+                processor,
+                detected_wav2vec2_base,
+                device,
+                return_confidence=False,
+                unk_token_replacement="*",
+            )
+
+            if result.get('error'):
+                continue
+
+            prediction = result['transcription']
+            from_sentences.append(prediction)
+            to_sentences.append(original_text)
+
+            if (i + 1) % 50 == 0:
+                print(f"    Processed {i + 1}/{total} samples")
+                callbacks.heartbeat(
+                    message=f"Transmorgrifier: processed {i + 1}/{total} samples",
+                    stage="transmorgrifier"
+                )
+
+        print(f"  Collected {len(from_sentences)} sentence pairs for transmorgrifier training")
+
+        if len(from_sentences) < 2:
+            print("  Warning: Not enough sentence pairs to train transmorgrifier")
+            return None
+
+        # Train the transmorgrifier
+        print("  Training SentenceTransmorgrifier...")
+        callbacks.heartbeat(message="Training SentenceTransmorgrifier model", stage="transmorgrifier")
+
+        tm = Transmorgrifier()
+        tm_device = 'GPU' if device == 'cuda' else 'CPU'
+        tm.train(
+            from_sentences=from_sentences,
+            to_sentences=to_sentences,
+            iterations=2000,
+            device=tm_device,
+            verbose=True,
         )
 
-        local_path = output_dir / os.path.basename(tm_path)
-        if not downloader.download_file(tm_path, local_path):
-            return {
-                'success': False,
-                'local_path': None,
-                'error_message': f"Could not download transmorgrifier from {tm_path}"
-            }
+        # Save the .tm file into the model output directory so it gets
+        # bundled into the asr_model.pth.tar archive automatically
+        tm_path = str(model_output_dir / "transmorgrifier.tm")
+        tm.save(tm_path)
+        print(f"  Saved transmorgrifier to: {tm_path}")
 
-        return {
-            'success': True,
-            'local_path': str(local_path),
-            'error_message': None
-        }
+        return tm
 
     except Exception as e:
-        return {
-            'success': False,
-            'local_path': None,
-            'error_message': f"{type(e).__name__}: {str(e)}"
-        }
+        print(f"  Error training transmorgrifier: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        return None
+
+
+def _write_training_metrics_csv(
+    log_history: Sequence[Dict[str, Any]],
+    output_path: Path,
+) -> Optional[Path]:
+    """
+    Extract training metrics from HuggingFace Trainer log_history and write
+    a CSV suitable for the frontend chart.
+
+    The log_history contains interleaved training-loss and eval entries.
+    We pair each eval entry with the most recent training loss to produce
+    rows with columns: epoch, train_loss, eval_loss, eval_wer, eval_cer.
+
+    Returns the path to the written CSV, or None if no eval entries exist.
+    """
+    if not log_history:
+        return None
+
+    last_train_loss = None
+    rows = []
+
+    for entry in log_history:
+        if 'loss' in entry and 'eval_loss' not in entry:
+            last_train_loss = entry.get('loss')
+        elif 'eval_loss' in entry:
+            rows.append({
+                'epoch': entry.get('epoch', ''),
+                'train_loss': last_train_loss if last_train_loss is not None else '',
+                'eval_loss': entry.get('eval_loss', ''),
+                'eval_wer': entry.get('eval_wer', ''),
+                'eval_cer': entry.get('eval_cer', ''),
+            })
+
+    if not rows:
+        return None
+
+    columns = ['epoch', 'train_loss', 'eval_loss', 'eval_wer', 'eval_cer']
+    with open(output_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return output_path
 
 
 def _upload_model(
     job_context: Dict[str, Any],
     callbacks,
     model_path: str,
-    job_id: str
+    job_id: str,
+    metrics_csv_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Upload trained model to GitLab using LFS as a .pth.tar archive."""
+    """Upload trained model (and optional artifacts) to GitLab using LFS as a .pth.tar archive.
+
+    The model directory may contain a transmorgrifier.tm file which will be
+    included in the archive automatically.
+    """
     try:
         model_dir = Path(model_path)
 
@@ -605,6 +737,23 @@ def _upload_model(
         # Remote path for the archive
         remote_path = f"gpu_jobs/job_{job_id}/model/{archive_filename}"
 
+        # Build file list for batch upload
+        files: List[Dict[str, Any]] = [
+            {
+                'local_path': str(archive_path),
+                'remote_path': remote_path,
+                'lfs': True,  # Model archives always use LFS
+            }
+        ]
+
+        if metrics_csv_path and os.path.exists(metrics_csv_path):
+            csv_remote = f"gpu_jobs/job_{job_id}/checkpoint/training_metrics.csv"
+            files.append({
+                'local_path': metrics_csv_path,
+                'remote_path': csv_remote,
+                'lfs': False,  # Small CSV, no need for LFS
+            })
+
         # Create uploader instance
         uploader = GitLabDatasetDownloader(
             config_path=None,
@@ -613,14 +762,10 @@ def _upload_model(
             project_id=str(job_context['project_id']),
         )
 
-        # Upload archive using LFS
+        # Upload all files in a single batch commit
         result = uploader.upload_batch(
-            files=[{
-                'local_path': str(archive_path),
-                'remote_path': remote_path,
-                'lfs': True,  # Model archives always use LFS
-            }],
-            commit_message=f"Upload ASR model for job {job_id}"
+            files=files,
+            commit_message=f"Upload ASR model and artifacts for job {job_id}"
         )
 
         # Clean up local archive

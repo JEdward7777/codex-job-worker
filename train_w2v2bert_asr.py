@@ -695,6 +695,9 @@ def train_w2v2bert_asr_api(
             "global_step": train_output.global_step,
         }
 
+        # Include full log history for training_metrics.csv generation
+        result["log_history"] = list(trainer.state.log_history)
+
         # Evaluate on test set
         if "test" in dataset_dict:
             logger.info("Evaluating on test set...")

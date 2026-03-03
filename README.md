@@ -22,7 +22,7 @@ The system is designed to run on GPU workers launched via [SkyPilot](https://sky
 
 ### Codex Editor Integration
 
-Jobs are created through a **Codex Editor plugin** that provides a user-friendly interface for:
+Jobs are created through a **Codex Editor plugin** ([codex_worker_frontend](https://github.com/JEdward7777/codex_worker_frontend)) that provides a user-friendly interface for:
 - Creating TTS/ASR training and inference jobs
 - Selecting voice references and model checkpoints
 - Monitoring job progress and results
@@ -195,7 +195,7 @@ python worker_entry.py
 
 Jobs are defined in a YAML manifest file at `gpu_jobs/manifest.yaml` in each GitLab project. The manifest is created by a **Codex Editor plugin** that provides a UI for creating and managing GPU jobs.
 
-> **Note**: The Codex Editor plugin that creates these manifest files is available separately. Download Codex Editor from [codexeditor.app](https://codexeditor.app/).
+> **Note**: The Codex Editor plugin that creates these manifest files is available separately — see [codex_worker_frontend](https://github.com/JEdward7777/codex_worker_frontend). Download Codex Editor from [codexeditor.app](https://codexeditor.app/).
 
 ### Manifest Format
 
@@ -377,6 +377,7 @@ dataset:
 
 ## Related Documentation
 
+- [codex_worker_frontend](https://github.com/JEdward7777/codex_worker_frontend) - **Codex Editor extension** (VS Code plugin) that creates and manages GPU jobs via the YAML manifest
 - [launcher_project/README.md](launcher_project/README.md) - **Monitor process & SkyPilot launcher** — auto-scales GPU workers based on job demand
 - [WORKER_IMPLEMENTATION_PLAN.md](WORKER_IMPLEMENTATION_PLAN.md) - Detailed architecture and implementation plan
 - [TRAINING_INSTRUCTIONS.md](TRAINING_INSTRUCTIONS.md) - Manual training instructions

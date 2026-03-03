@@ -12,6 +12,7 @@ Supports both:
 
 import os
 import sys
+import glob
 import json
 import traceback
 from pathlib import Path
@@ -85,13 +86,6 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         # Get model parameters
         use_wav2vec2_base = model_config.get('use_wav2vec2_base')
 
-        # Get SentenceTransmorgrifier config (handler-specific)
-        # Defaults to enabled if model_path is provided, can be explicitly disabled
-        tm_config = job_context.get('transmorgrifier', {})
-        tm_model_path = tm_config.get('model_path')
-        # Default: enabled=True if model_path exists, but can be explicitly set to False
-        use_transmorgrifier = tm_config.get('enabled', True) and tm_model_path is not None
-
         # Get filter configuration (per spec, inference filters under 'inference')
         include_verses = inference_config.get('include_verses', [])
         exclude_verses = inference_config.get('exclude_verses', [])
@@ -103,7 +97,6 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print("\nInference Configuration:")
         print(f"  Model path: {model_path}")
         print(f"  Use Wav2Vec2 base: {use_wav2vec2_base or 'Auto-detect'}")
-        print(f"  SentenceTransmorgrifier: {tm_model_path or 'Disabled'}")
         print(f"  Suppress UNK tokens: {suppress_unk}")
         if include_verses:
             print(f"  Include verses: {len(include_verses)} specified")
@@ -132,35 +125,8 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         local_model_path = model_result['local_path']
         print(f"  Downloaded model to: {local_model_path}")
 
-        # Step 2: Load SentenceTransmorgrifier if configured
-        transmorgrifier = None
-        if use_transmorgrifier and tm_model_path:
-            print("\nStep 2: Loading SentenceTransmorgrifier...")
-            callbacks.heartbeat(message="Loading SentenceTransmorgrifier", stage="download")
-
-            if not TRANSMORGRIFIER_AVAILABLE:
-                print("  Warning: SentenceTransmorgrifier not installed, skipping post-processing")
-                print("  Install with: pip install sentence-transmorgrifier")
-            else:
-                tm_result = _download_transmorgrifier(
-                    job_context=job_context,
-                    callbacks=callbacks,
-                    tm_path=tm_model_path,
-                    output_dir=work_dir / "transmorgrifier"
-                )
-
-                if tm_result['success']:
-                    transmorgrifier = Transmorgrifier()
-                    transmorgrifier.load(tm_result['local_path'])
-                    print(f"  Loaded SentenceTransmorgrifier from: {tm_result['local_path']}")
-                else:
-                    print(f"  Warning: Failed to load SentenceTransmorgrifier: {tm_result['error_message']}")
-                    print("  Continuing without post-processing")
-        else:
-            print("\nStep 2: SentenceTransmorgrifier not configured, skipping")
-
-        # Step 3: Load ASR model
-        print("\nStep 3: Loading ASR model...")
+        # Step 2: Load ASR model
+        print("\nStep 2: Loading ASR model...")
         callbacks.heartbeat(message="Loading ASR model", stage="inference")
 
         import torch
@@ -173,6 +139,35 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
 
         model_arch = "Wav2Vec2" if detected_wav2vec2_base else "Wav2Vec2-BERT"
         print(f"  Loaded {model_arch} model on {device}")
+
+        # Step 3: Auto-detect SentenceTransmorgrifier from model archive
+        transmorgrifier = None
+        tm_files = glob.glob(os.path.join(local_model_path, '*.tm'))
+        if tm_files and TRANSMORGRIFIER_AVAILABLE:
+            print("\nStep 3: Loading SentenceTransmorgrifier from model archive...")
+            try:
+                transmorgrifier = Transmorgrifier()
+                transmorgrifier.load(tm_files[0])
+                print(f"  Loaded SentenceTransmorgrifier: {os.path.basename(tm_files[0])}")
+            except Exception as e:
+                print(f"  Warning: Failed to load SentenceTransmorgrifier: {e}")
+                print("  Continuing without post-processing")
+                transmorgrifier = None
+        elif tm_files and not TRANSMORGRIFIER_AVAILABLE:
+            print("\nStep 3: SentenceTransmorgrifier found in model archive but package not installed")
+            print("  Install with: pip install sentence-transmorgrifier")
+        else:
+            print("\nStep 3: No SentenceTransmorgrifier found in model archive, skipping")
+
+        # Determine UNK replacement strategy:
+        # If transmorgrifier is active, use "*" so it can handle UNK tokens.
+        # Otherwise, fall back to the configured suppress_unk / unk_replacement.
+        if transmorgrifier:
+            effective_unk_replacement = "*"
+        elif suppress_unk:
+            effective_unk_replacement = unk_replacement
+        else:
+            effective_unk_replacement = None
 
         # Step 4: Download audio and process cells
         print("\nStep 4: Processing cells needing transcription...")
@@ -282,7 +277,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                     detected_wav2vec2_base,
                     device,
                     return_confidence=True,
-                    unk_token_replacement=unk_replacement if suppress_unk else None,
+                    unk_token_replacement=effective_unk_replacement,
                 )
 
                 if result.get('error'):
@@ -445,55 +440,6 @@ def _download_model(
         return {
             'success': True,
             'local_path': str(local_archive_path),
-            'error_message': None
-        }
-
-    except Exception as e:
-        return {
-            'success': False,
-            'local_path': None,
-            'error_message': f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-        }
-
-
-def _download_transmorgrifier(
-    job_context: Dict[str, Any],
-    callbacks,
-    tm_path: str,
-    output_dir: Path
-) -> Dict[str, Any]:
-    """
-    Download SentenceTransmorgrifier model from GitLab.
-
-    Uses GitLabDatasetDownloader.download_file() which automatically handles
-    Git LFS files.
-
-    Returns:
-        Dictionary with success, local_path, error_message
-    """
-    try:
-        scanner = callbacks.scanner
-
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        downloader = GitLabDatasetDownloader(
-            config_path=None,
-            gitlab_url=scanner.server_url,
-            access_token=scanner.access_token,
-            project_id=str(job_context['project_id']),
-        )
-
-        local_path = output_dir / os.path.basename(tm_path)
-        if not downloader.download_file(tm_path, local_path):
-            return {
-                'success': False,
-                'local_path': None,
-                'error_message': f"Could not download transmorgrifier from {tm_path}"
-            }
-
-        return {
-            'success': True,
-            'local_path': str(local_path),
             'error_message': None
         }
 

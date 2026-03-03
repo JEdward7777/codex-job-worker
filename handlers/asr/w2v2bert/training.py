@@ -16,7 +16,7 @@ import csv
 import json
 import traceback
 from pathlib import Path
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Sequence
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
@@ -216,15 +216,26 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             print(f"  Test WER: {train_result['test_results'].get('eval_wer', 'N/A')}")
             print(f"  Test CER: {train_result['test_results'].get('eval_cer', 'N/A')}")
 
-        # Step 4: Upload model to GitLab
-        print("\nStep 4: Uploading model to GitLab...")
+        # Step 4: Write training metrics CSV
+        metrics_csv_path = None
+        log_history = train_result.get('log_history')
+        if log_history:
+            metrics_csv_path = _write_training_metrics_csv(
+                log_history, work_dir / "training_metrics.csv"
+            )
+            if metrics_csv_path:
+                print(f"  Training metrics CSV written: {metrics_csv_path}")
+
+        # Step 5: Upload model to GitLab
+        print("\nStep 5: Uploading model to GitLab...")
         callbacks.heartbeat(message="Uploading model", stage="upload")
 
         upload_result = _upload_model(
             job_context=job_context,
             callbacks=callbacks,
             model_path=train_result['final_model_path'],
-            job_id=job_context['job_id']
+            job_id=job_context['job_id'],
+            metrics_csv_path=str(metrics_csv_path) if metrics_csv_path else None,
         )
 
         if not upload_result['success']:
@@ -255,6 +266,53 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             'success': False,
             'error_message': error_msg
         }
+
+
+def _write_training_metrics_csv(
+    log_history: Sequence[Dict[str, Any]],
+    output_path: Path,
+) -> Optional[Path]:
+    """
+    Extract training metrics from HuggingFace Trainer log_history and write
+    a CSV suitable for the frontend chart.
+
+    The log_history contains interleaved training-loss and eval entries.
+    We pair each eval entry with the most recent training loss to produce
+    rows with columns: epoch, train_loss, eval_loss, eval_wer, eval_cer.
+
+    Returns the path to the written CSV, or None if no eval entries exist.
+    """
+    if not log_history:
+        return None
+
+    # Separate training and eval entries
+    last_train_loss = None
+    rows = []
+
+    for entry in log_history:
+        if 'loss' in entry and 'eval_loss' not in entry:
+            # Training log entry
+            last_train_loss = entry.get('loss')
+        elif 'eval_loss' in entry:
+            # Eval log entry — pair with most recent train loss
+            rows.append({
+                'epoch': entry.get('epoch', ''),
+                'train_loss': last_train_loss if last_train_loss is not None else '',
+                'eval_loss': entry.get('eval_loss', ''),
+                'eval_wer': entry.get('eval_wer', ''),
+                'eval_cer': entry.get('eval_cer', ''),
+            })
+
+    if not rows:
+        return None
+
+    columns = ['epoch', 'train_loss', 'eval_loss', 'eval_wer', 'eval_cer']
+    with open(output_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    return output_path
 
 
 def _download_training_data(
@@ -468,13 +526,15 @@ def _upload_model(
     job_context: Dict[str, Any],
     callbacks,
     model_path: str,
-    job_id: str
+    job_id: str,
+    metrics_csv_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Upload a trained model to GitLab using LFS as a .pth.tar archive.
+    Upload a trained model (and optional artifacts) to GitLab using LFS.
 
     For HuggingFace models, this creates a tar archive of the model directory
-    and uploads it as a single LFS file.
+    and uploads it as a single LFS file.  An optional training_metrics.csv
+    is uploaded alongside (non-LFS) for the frontend chart.
 
     Returns:
         Dictionary with success, remote_path, error_message
@@ -492,6 +552,23 @@ def _upload_model(
         # Remote path for the archive
         remote_path = f"gpu_jobs/job_{job_id}/model/{archive_filename}"
 
+        # Build file list for batch upload
+        files: List[Dict[str, Any]] = [
+            {
+                'local_path': str(archive_path),
+                'remote_path': remote_path,
+                'lfs': True,  # Model archives always use LFS
+            }
+        ]
+
+        if metrics_csv_path and os.path.exists(metrics_csv_path):
+            csv_remote = f"gpu_jobs/job_{job_id}/checkpoint/training_metrics.csv"
+            files.append({
+                'local_path': metrics_csv_path,
+                'remote_path': csv_remote,
+                'lfs': False,  # Small CSV, no need for LFS
+            })
+
         # Create uploader instance
         uploader = GitLabDatasetDownloader(
             config_path=None,
@@ -500,14 +577,10 @@ def _upload_model(
             project_id=str(job_context['project_id']),
         )
 
-        # Upload archive using LFS
+        # Upload all files in a single batch commit
         result = uploader.upload_batch(
-            files=[{
-                'local_path': str(archive_path),
-                'remote_path': remote_path,
-                'lfs': True,  # Model archives always use LFS
-            }],
-            commit_message=f"Upload ASR model for job {job_id}"
+            files=files,
+            commit_message=f"Upload ASR model and artifacts for job {job_id}"
         )
 
         # Clean up local archive
