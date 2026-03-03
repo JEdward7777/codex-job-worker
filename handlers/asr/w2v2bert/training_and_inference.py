@@ -690,9 +690,13 @@ def _write_training_metrics_csv(
     We write *both* kinds of entries so the CSV has dense data:
 
     - Training-loss entries (logged every ``logging_steps``) produce rows
-      with ``train_loss`` filled and eval columns empty.
-    - Eval entries produce rows with ``eval_loss``, ``eval_wer``, and
-      ``eval_cer`` filled, plus the most recent ``train_loss``.
+      with ``train_total_loss`` filled and eval columns empty.
+    - Eval entries produce rows with ``val_total_loss``, ``val_wer``, and
+      ``val_cer`` filled, plus the most recent ``train_total_loss``.
+
+    Column names use the ``train_total_loss`` / ``val_total_loss`` convention
+    expected by the frontend chart (see ``wizard.js`` and
+    ``TrainingMetricsData.hasPrimaryColumns``).
 
     This ensures the frontend always has enough data points to render a
     meaningful chart, regardless of how infrequently evaluation runs.
@@ -711,25 +715,25 @@ def _write_training_metrics_csv(
             last_train_loss = entry.get('loss')
             rows.append({
                 'epoch': entry.get('epoch', ''),
-                'train_loss': last_train_loss,
-                'eval_loss': '',
-                'eval_wer': '',
-                'eval_cer': '',
+                'train_total_loss': last_train_loss,
+                'val_total_loss': '',
+                'val_wer': '',
+                'val_cer': '',
             })
         elif 'eval_loss' in entry:
             # Evaluation entry (emitted every eval_steps or every epoch)
             rows.append({
                 'epoch': entry.get('epoch', ''),
-                'train_loss': last_train_loss if last_train_loss is not None else '',
-                'eval_loss': entry.get('eval_loss', ''),
-                'eval_wer': entry.get('eval_wer', ''),
-                'eval_cer': entry.get('eval_cer', ''),
+                'train_total_loss': last_train_loss if last_train_loss is not None else '',
+                'val_total_loss': entry.get('eval_loss', ''),
+                'val_wer': entry.get('eval_wer', ''),
+                'val_cer': entry.get('eval_cer', ''),
             })
 
     if not rows:
         return None
 
-    columns = ['epoch', 'train_loss', 'eval_loss', 'eval_wer', 'eval_cer']
+    columns = ['epoch', 'train_total_loss', 'val_total_loss', 'val_wer', 'val_cer']
     with open(output_path, 'w', newline='', encoding='utf-8') as f:
         writer = csv.DictWriter(f, fieldnames=columns)
         writer.writeheader()
