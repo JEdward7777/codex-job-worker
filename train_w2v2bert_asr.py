@@ -415,6 +415,7 @@ def train_w2v2bert_asr_api(
     warmup_steps: int = 500,
     save_steps: int = 500,
     eval_steps: int = 500,
+    eval_strategy: str = "epoch",
     logging_steps: int = 100,
     save_total_limit: int = 3,
     fp16: bool = True,
@@ -423,6 +424,7 @@ def train_w2v2bert_asr_api(
     seed: int = 42,
     resume_from_checkpoint: Optional[str] = None,
     heartbeat_callback: Optional[Callable[[int], None]] = None,
+    disable_progress_bars: bool = False,
 ) -> Dict[str, Any]:
     """
     Train W2V2-BERT ASR model via Python API.
@@ -453,8 +455,11 @@ def train_w2v2bert_asr_api(
         num_train_epochs: Number of training epochs
         warmup_steps: Number of warmup steps
         save_steps: Save checkpoint every N steps
-        eval_steps: Evaluate every N steps
-        logging_steps: Log every N steps
+        eval_steps: Evaluate every N steps (only used when eval_strategy="steps")
+        eval_strategy: When to run evaluation - "epoch" (every epoch, default) or
+                      "steps" (every eval_steps steps). Using "epoch" ensures one
+                      evaluation per epoch which produces denser training metrics.
+        logging_steps: Log training loss every N steps
         save_total_limit: Maximum number of checkpoints to keep
         fp16: Use FP16 mixed precision
         bf16: Use BF16 mixed precision
@@ -463,6 +468,9 @@ def train_w2v2bert_asr_api(
         resume_from_checkpoint: Path to checkpoint to resume from
         heartbeat_callback: Optional callback invoked each epoch with epoch number.
                            Can raise exception to cancel training.
+        disable_progress_bars: If True, disable tqdm progress bars from HuggingFace
+                              Trainer and datasets.map(). Useful when running as a
+                              background handler where progress bars create log noise.
 
     Returns:
         Dict with keys:
@@ -487,6 +495,11 @@ def train_w2v2bert_asr_api(
     }
 
     try:
+        # Disable progress bars when running as a handler (non-interactive)
+        if disable_progress_bars:
+            import datasets
+            datasets.disable_progress_bars()
+
         # Auto-detect model architecture if not explicitly specified
         if use_wav2vec2_base is None:
             use_wav2vec2_base = "bert" not in model_name.lower()
@@ -614,15 +627,18 @@ def train_w2v2bert_asr_api(
         wer_metric = evaluate.load("wer")
         cer_metric = evaluate.load("cer")
 
-        # Training arguments
-        training_args = TrainingArguments(
+        # Build TrainingArguments.  When eval_strategy is "epoch" the Trainer
+        # evaluates once per epoch, giving us one metrics row per epoch in the
+        # log_history.  When "steps", eval_steps controls the frequency.
+        # We also align save_strategy with eval_strategy so that
+        # load_best_model_at_end works correctly (it requires matching strategies).
+        training_args_kwargs = dict(
             output_dir=output_dir,
             per_device_train_batch_size=per_device_train_batch_size,
             per_device_eval_batch_size=per_device_eval_batch_size,
             gradient_accumulation_steps=gradient_accumulation_steps,
-            eval_strategy="steps",
-            eval_steps=eval_steps,
-            save_steps=save_steps,
+            eval_strategy=eval_strategy,
+            save_strategy=eval_strategy,  # must match eval_strategy for load_best_model_at_end
             logging_steps=logging_steps,
             learning_rate=learning_rate,
             num_train_epochs=num_train_epochs,
@@ -637,7 +653,16 @@ def train_w2v2bert_asr_api(
             report_to=["tensorboard"],
             logging_dir=os.path.join(output_dir, "logs"),
             seed=seed,
+            disable_tqdm=disable_progress_bars,
         )
+
+        # Only pass step-based params when using "steps" strategy
+        if eval_strategy == "steps":
+            training_args_kwargs["eval_steps"] = eval_steps
+            training_args_kwargs["save_steps"] = save_steps
+
+        logger.info("Eval/save strategy: %s", eval_strategy)
+        training_args = TrainingArguments(**training_args_kwargs)
 
         # Log optimizer choice
         if use_8bit_optimizer:
@@ -715,6 +740,12 @@ def train_w2v2bert_asr_api(
         logger.error(error_msg)
         logger.error(traceback.format_exc())
         result["error_message"] = error_msg
+    finally:
+        # Re-enable progress bars if they were disabled, in case the
+        # process is reused for another call
+        if disable_progress_bars:
+            import datasets
+            datasets.enable_progress_bars()
 
     return result
 
@@ -781,6 +812,9 @@ def main():
     parser.add_argument("--warmup_steps", type=int, default=500)
     parser.add_argument("--save_steps", type=int, default=500)
     parser.add_argument("--eval_steps", type=int, default=500)
+    parser.add_argument("--eval_strategy", type=str, default="epoch",
+                       choices=["epoch", "steps"],
+                       help="Evaluation strategy: 'epoch' (once per epoch) or 'steps' (every eval_steps)")
     parser.add_argument("--logging_steps", type=int, default=100)
     parser.add_argument("--save_total_limit", type=int, default=3)
 
@@ -932,15 +966,14 @@ def main():
     wer_metric = evaluate.load("wer")
     cer_metric = evaluate.load("cer")
 
-    # Training arguments
-    training_args = TrainingArguments(
+    # Training arguments - align save_strategy with eval_strategy
+    training_args_kwargs = dict(
         output_dir=args.output_dir,
         per_device_train_batch_size=args.per_device_train_batch_size,
         per_device_eval_batch_size=args.per_device_eval_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        eval_strategy="steps",
-        eval_steps=args.eval_steps,
-        save_steps=args.save_steps,
+        eval_strategy=args.eval_strategy,
+        save_strategy=args.eval_strategy,
         logging_steps=args.logging_steps,
         learning_rate=args.learning_rate,
         num_train_epochs=args.num_train_epochs,
@@ -958,6 +991,13 @@ def main():
         logging_dir=os.path.join(args.output_dir, "logs"),
         seed=args.seed,
     )
+
+    if args.eval_strategy == "steps":
+        training_args_kwargs["eval_steps"] = args.eval_steps
+        training_args_kwargs["save_steps"] = args.save_steps
+
+    logger.info("Eval/save strategy: %s", args.eval_strategy)
+    training_args = TrainingArguments(**training_args_kwargs)
 
     # Log optimizer choice
     if args.use_8bit_optimizer:

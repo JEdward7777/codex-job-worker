@@ -112,6 +112,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         warmup_steps = job_context.get('warmup_steps', 500)
         save_steps = job_context.get('save_steps', 500)
         eval_steps = job_context.get('eval_steps', 500)
+        eval_strategy = job_context.get('eval_strategy', 'epoch')
         val_split = job_context.get('val_split', 0.1)
         test_split = job_context.get('test_split', 0.1)
         max_duration_seconds = job_context.get('max_duration_seconds')
@@ -306,8 +307,10 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             warmup_steps=warmup_steps,
             save_steps=save_steps,
             eval_steps=eval_steps,
+            eval_strategy=eval_strategy,
             use_8bit_optimizer=use_8bit_optimizer,
-            heartbeat_callback=training_heartbeat
+            heartbeat_callback=training_heartbeat,
+            disable_progress_bars=True,
         )
 
         if not train_result['success']:
@@ -684,10 +687,17 @@ def _write_training_metrics_csv(
     a CSV suitable for the frontend chart.
 
     The log_history contains interleaved training-loss and eval entries.
-    We pair each eval entry with the most recent training loss to produce
-    rows with columns: epoch, train_loss, eval_loss, eval_wer, eval_cer.
+    We write *both* kinds of entries so the CSV has dense data:
 
-    Returns the path to the written CSV, or None if no eval entries exist.
+    - Training-loss entries (logged every ``logging_steps``) produce rows
+      with ``train_loss`` filled and eval columns empty.
+    - Eval entries produce rows with ``eval_loss``, ``eval_wer``, and
+      ``eval_cer`` filled, plus the most recent ``train_loss``.
+
+    This ensures the frontend always has enough data points to render a
+    meaningful chart, regardless of how infrequently evaluation runs.
+
+    Returns the path to the written CSV, or None if no entries exist.
     """
     if not log_history:
         return None
@@ -697,8 +707,17 @@ def _write_training_metrics_csv(
 
     for entry in log_history:
         if 'loss' in entry and 'eval_loss' not in entry:
+            # Training-loss log entry (emitted every logging_steps)
             last_train_loss = entry.get('loss')
+            rows.append({
+                'epoch': entry.get('epoch', ''),
+                'train_loss': last_train_loss,
+                'eval_loss': '',
+                'eval_wer': '',
+                'eval_cer': '',
+            })
         elif 'eval_loss' in entry:
+            # Evaluation entry (emitted every eval_steps or every epoch)
             rows.append({
                 'epoch': entry.get('epoch', ''),
                 'train_loss': last_train_loss if last_train_loss is not None else '',
