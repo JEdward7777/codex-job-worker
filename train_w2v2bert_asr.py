@@ -593,6 +593,11 @@ def train_w2v2bert_asr_api(
                 param.requires_grad = False
             logger.info("Froze Wav2Vec2-BERT feature projection parameters")
 
+        # Enable gradient checkpointing to reduce activation memory usage
+        # This trades ~30% slower training for ~60% less activation memory
+        model.gradient_checkpointing_enable()
+        logger.info("Enabled gradient checkpointing for memory optimization")
+
         # Prepare dataset
         dataset_dict = prepare_dataset(
             df, processor, text_normalizer, use_wav2vec2_base,
@@ -905,6 +910,11 @@ def main():
         for param in model.wav2vec2_bert.feature_projection.parameters():
             param.requires_grad = False
         logger.info("Froze Wav2Vec2-BERT feature projection parameters")
+
+    # Enable gradient checkpointing to reduce activation memory usage
+    # This trades ~30% slower training for ~60% less activation memory
+    model.gradient_checkpointing_enable()
+    logger.info("Enabled gradient checkpointing for memory optimization")
 
     # Prepare dataset
     dataset_dict = prepare_dataset(

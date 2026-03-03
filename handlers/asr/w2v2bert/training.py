@@ -54,20 +54,6 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         model_config = job_context.get('model', {})
         training_config = job_context.get('training', {})
 
-        # Get training parameters with defaults
-        # 'epochs' is a top-level manifest field per the spec.
-        num_epochs = job_context.get('epochs', 5)
-        batch_size = job_context.get('batch_size', 8)
-        learning_rate = job_context.get('learning_rate', 3e-4)
-        gradient_accumulation_steps = job_context.get('gradient_accumulation_steps', 2)
-        warmup_steps = job_context.get('warmup_steps', 500)
-        save_steps = job_context.get('save_steps', 500)
-        eval_steps = job_context.get('eval_steps', 500)
-        val_split = job_context.get('val_split', 0.1)
-        test_split = job_context.get('test_split', 0.1)
-        max_duration_seconds = job_context.get('max_duration_seconds')
-        use_8bit_optimizer = job_context.get('use_8bit_optimizer', False)
-
         # Get model parameters
         base_model = model_config.get('base_model', 'facebook/w2v-bert-2.0')
         base_checkpoint = model_config.get('base_checkpoint')
@@ -77,6 +63,33 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         use_wav2vec2_base = model_config.get('use_wav2vec2_base')
         if use_wav2vec2_base is None:
             use_wav2vec2_base = 'bert' not in base_model.lower()
+
+        # Set memory-aware defaults based on model size.
+        # W2V2-BERT 2.0 (~600M params) needs smaller batch size and memory
+        # optimizations to fit on a 24GB GPU. The smaller wav2vec2-base
+        # (~95M params) can use larger batches comfortably.
+        if use_wav2vec2_base:
+            default_batch_size = 8
+            default_gradient_accumulation = 2
+            default_use_8bit_optimizer = False
+        else:
+            default_batch_size = 2
+            default_gradient_accumulation = 8
+            default_use_8bit_optimizer = True
+
+        # Get training parameters with defaults
+        # 'epochs' is a top-level manifest field per the spec.
+        num_epochs = job_context.get('epochs', 5)
+        batch_size = job_context.get('batch_size', default_batch_size)
+        learning_rate = job_context.get('learning_rate', 3e-4)
+        gradient_accumulation_steps = job_context.get('gradient_accumulation_steps', default_gradient_accumulation)
+        warmup_steps = job_context.get('warmup_steps', 500)
+        save_steps = job_context.get('save_steps', 500)
+        eval_steps = job_context.get('eval_steps', 500)
+        val_split = job_context.get('val_split', 0.1)
+        test_split = job_context.get('test_split', 0.1)
+        max_duration_seconds = job_context.get('max_duration_seconds')
+        use_8bit_optimizer = job_context.get('use_8bit_optimizer', default_use_8bit_optimizer)
 
         # Text normalization options (handler-specific, not in manifest spec)
         text_config = job_context.get('text_normalization', {})
@@ -99,7 +112,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print(f"  Validation split: {val_split}")
         print(f"  Test split: {test_split}")
         print(f"  8-bit optimizer: {use_8bit_optimizer}")
-        print(f"  Base checkpoint: {base_checkpoint or 'None (training from scratch)'}")
+        print(f"  Base checkpoint: {base_checkpoint or 'None (fine-tuning from pretrained weights)'}")
         if max_duration_seconds:
             print(f"  Max audio duration: {max_duration_seconds}s")
         if include_verses:
@@ -164,7 +177,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                 print(f"  Warning: Failed to download checkpoint: {checkpoint_result['error_message']}")
                 print("  Training will start from scratch.")
         else:
-            print("\nStep 2: No base checkpoint specified, training from scratch")
+            print("\nStep 2: No base checkpoint specified, fine-tuning from pretrained weights")
 
         # Step 3: Train the model
         print("\nStep 3: Training W2V2-BERT ASR model...")
