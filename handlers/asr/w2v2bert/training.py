@@ -270,7 +270,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             'success': True,
             'error_message': None,
             'epochs_completed': train_result['epochs_completed'],
-            'model_path': upload_result['remote_path'],
+            'checkpoint_path': upload_result['remote_path'],
             'test_results': train_result.get('test_results'),
             'train_metrics': train_result.get('train_metrics')
         }
