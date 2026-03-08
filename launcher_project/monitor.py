@@ -615,6 +615,16 @@ class Monitor:
 
         logger.info(f"Checking {cloud_provider} instance status...")
         instances = provider.list_instances(prefix=WORKER_PREFIX)
+        if instances is None:
+            # list_instances returned None to signal a transient failure
+            # (e.g., API rate limit).  Skip this cycle rather than
+            # incorrectly assuming there are 0 workers and launching
+            # duplicates.
+            logger.warning(
+                "Could not retrieve instance list — skipping this cycle "
+                "to avoid launching duplicate workers."
+            )
+            return
         logger.info(f"Found {len(instances)} {WORKER_PREFIX}* instances")
 
         for inst in instances:
@@ -768,11 +778,14 @@ class Monitor:
         print(f"Monitor Status Report (provider: {cloud_provider})")
         print(f"{'='*60}")
         print(f"Active jobs (pending + running): {active_jobs}")
-        print(f"Worker instances ({WORKER_PREFIX}*): {len(instances)}")
-        for inst in instances:
-            gpu_info = f" [{inst.gpu_name}]" if inst.gpu_name else ""
-            cost_info = f" ${inst.cost_per_hour:.3f}/hr" if inst.cost_per_hour else ""
-            print(f"  {inst.name}: {inst.status}{gpu_info}{cost_info}")
+        if instances is None:
+            print(f"Worker instances ({WORKER_PREFIX}*): ERROR — could not retrieve list")
+        else:
+            print(f"Worker instances ({WORKER_PREFIX}*): {len(instances)}")
+            for inst in instances:
+                gpu_info = f" [{inst.gpu_name}]" if inst.gpu_name else ""
+                cost_info = f" ${inst.cost_per_hour:.3f}/hr" if inst.cost_per_hour else ""
+                print(f"  {inst.name}: {inst.status}{gpu_info}{cost_info}")
         print(f"{'='*60}\n")
 
 

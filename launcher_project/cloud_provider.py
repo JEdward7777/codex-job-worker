@@ -74,7 +74,7 @@ class CloudProvider(ABC):
     """
 
     @abstractmethod
-    def list_instances(self, prefix: str = '') -> List[InstanceInfo]:
+    def list_instances(self, prefix: str = '') -> Optional[List[InstanceInfo]]:
         """
         List all instances, optionally filtered by name prefix.
 
@@ -83,7 +83,10 @@ class CloudProvider(ABC):
                     with this prefix (e.g., 'codex-worker-').
 
         Returns:
-            List of InstanceInfo objects for matching instances.
+            List of InstanceInfo objects for matching instances, or *None*
+            if the provider could not retrieve the list (e.g., API error,
+            rate limit).  Returning None lets the caller distinguish
+            "no instances exist" from "we couldn't check".
         """
         ...
 

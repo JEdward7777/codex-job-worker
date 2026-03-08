@@ -31,7 +31,7 @@ class SkyPilotProvider(CloudProvider):
     def __init__(self, logger: Optional[logging.Logger] = None):
         self.logger = logger or logging.getLogger(__name__)
 
-    def list_instances(self, prefix: str = '') -> List[InstanceInfo]:
+    def list_instances(self, prefix: str = '') -> Optional[List[InstanceInfo]]:
         """
         List SkyPilot clusters, optionally filtered by name prefix.
 
@@ -57,7 +57,7 @@ class SkyPilotProvider(CloudProvider):
                 clusters = sky.get(request_id)
         except Exception as e:
             self.logger.error(f"Failed to get sky status: {e}")
-            return []
+            return None
 
         if not clusters:
             return []

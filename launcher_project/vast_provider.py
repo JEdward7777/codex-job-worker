@@ -19,6 +19,8 @@ Usage:
 """
 
 import logging
+import re
+import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
@@ -29,6 +31,15 @@ from skypilot_provider import SkyPilotProvider  # pylint: disable=import-error
 
 # Vast.ai API base URL
 VAST_API_BASE = 'https://console.vast.ai/api/v0'
+
+# Retry settings for Vast.ai API calls (exponential backoff)
+_MAX_RETRIES = 3
+_INITIAL_BACKOFF_SECONDS = 2.0
+
+# SkyPilot names Vast.ai instances as "{cluster_name}-{host_id}-head".
+# This regex extracts the cluster name portion from the full Vast.ai label.
+# Example: "codex-worker-006479f5-413d3bc4-head" → "codex-worker-006479f5"
+_SKYPILOT_LABEL_RE = re.compile(r'^(.+)-[0-9a-f]{8}-head$')
 
 # Map Vast.ai actual_status values to our normalized statuses
 _VAST_STATUS_MAP = {
@@ -70,7 +81,12 @@ class VastCloudProvider(CloudProvider):
         # Internal SkyPilot provider for operations not yet reimplemented
         self._skypilot = SkyPilotProvider(logger=self.logger)
 
-    def list_instances(self, prefix: str = '') -> List[InstanceInfo]:
+        # Cache mapping Vast.ai instance IDs to their labels (populated by
+        # list_instances).  Used by destroy_instance to resolve the SkyPilot
+        # cluster name from a numeric Vast.ai ID.
+        self._id_to_label: Dict[str, str] = {}
+
+    def list_instances(self, prefix: str = '') -> Optional[List[InstanceInfo]]:
         """
         List Vast.ai instances using the REST API.
 
@@ -79,24 +95,97 @@ class VastCloudProvider(CloudProvider):
                     with this prefix (e.g., 'codex-worker-').
 
         Returns:
-            List of InstanceInfo objects for matching instances.
+            List of InstanceInfo objects for matching instances, or *None*
+            if the API request failed (e.g., rate limit, network error).
+            Returning None (rather than []) lets the caller distinguish
+            "no instances exist" from "we couldn't check".
         """
-        try:
-            resp = requests.get(
-                f'{VAST_API_BASE}/instances',
-                params={'owner': 'me'},
-                headers=self._headers,
-                timeout=30,
+        last_error = None
+        for attempt in range(_MAX_RETRIES):
+            try:
+                resp = requests.get(
+                    f'{VAST_API_BASE}/instances',
+                    params={'owner': 'me'},
+                    headers=self._headers,
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                break  # Success — exit retry loop
+            except requests.RequestException as e:
+                last_error = e
+                is_rate_limit = (
+                    isinstance(e, requests.HTTPError)
+                    and e.response is not None
+                    and e.response.status_code == 429
+                )
+                if is_rate_limit:
+                    # Log full 429 response details so we can tune retry
+                    # behaviour based on what Vast.ai actually sends back.
+                    resp_obj = e.response
+                    self.logger.debug(
+                        f"429 response headers: {dict(resp_obj.headers)}"
+                    )
+                    try:
+                        body_text = resp_obj.text[:500]  # cap at 500 chars
+                    except Exception:
+                        body_text = '<unreadable>'
+                    self.logger.debug(
+                        f"429 response body (first 500 chars): {body_text}"
+                    )
+                if attempt < _MAX_RETRIES - 1 and is_rate_limit:
+                    # Respect the Retry-After header if the server provides
+                    # one; otherwise fall back to exponential backoff.
+                    retry_after = e.response.headers.get('Retry-After')
+                    if retry_after is not None:
+                        self.logger.debug(
+                            f"Retry-After header present: {retry_after!r}"
+                        )
+                        try:
+                            backoff = float(retry_after)
+                        except (ValueError, TypeError):
+                            self.logger.debug(
+                                f"Could not parse Retry-After as float, "
+                                f"falling back to exponential backoff"
+                            )
+                            backoff = _INITIAL_BACKOFF_SECONDS * (2 ** attempt)
+                    else:
+                        self.logger.debug(
+                            "No Retry-After header in 429 response, "
+                            "using exponential backoff"
+                        )
+                        backoff = _INITIAL_BACKOFF_SECONDS * (2 ** attempt)
+                    self.logger.warning(
+                        f"Vast.ai API rate limited (429), "
+                        f"retrying in {backoff:.1f}s "
+                        f"(attempt {attempt + 1}/{_MAX_RETRIES})"
+                    )
+                    time.sleep(backoff)
+                else:
+                    self.logger.error(
+                        f"Failed to list Vast.ai instances: {e}"
+                    )
+                    return None
+        else:
+            # All retries exhausted
+            self.logger.error(
+                f"Failed to list Vast.ai instances after {_MAX_RETRIES} "
+                f"attempts: {last_error}"
             )
-            resp.raise_for_status()
-            data = resp.json()
-        except requests.RequestException as e:
-            self.logger.error(f"Failed to list Vast.ai instances: {e}")
-            return []
+            return None
 
         instances_data = data.get('instances', [])
         if not instances_data:
             return []
+
+        # Refresh the ID-to-label cache so destroy_instance can resolve
+        # Vast.ai numeric IDs to SkyPilot cluster names.
+        self._id_to_label = {}
+        for inst in instances_data:
+            inst_id = str(inst.get('id', ''))
+            inst_label = inst.get('label') or ''
+            if inst_id and inst_label:
+                self._id_to_label[inst_id] = inst_label
 
         results = []
         for inst in instances_data:
@@ -183,17 +272,62 @@ class VastCloudProvider(CloudProvider):
             stream=stream,
         )
 
+    @staticmethod
+    def _extract_cluster_name(label: str) -> Optional[str]:
+        """
+        Extract the SkyPilot cluster name from a Vast.ai instance label.
+
+        SkyPilot names Vast.ai instances as ``{cluster}-{host_id}-head``.
+        For example, ``codex-worker-006479f5-413d3bc4-head`` belongs to
+        cluster ``codex-worker-006479f5``.
+
+        Args:
+            label: The Vast.ai instance label.
+
+        Returns:
+            The SkyPilot cluster name, or *None* if the label doesn't
+            match the expected pattern.
+        """
+        m = _SKYPILOT_LABEL_RE.match(label)
+        return m.group(1) if m else None
+
     def destroy_instance(self, instance_id: str) -> bool:
         """
-        Destroy a Vast.ai instance.
+        Destroy a Vast.ai instance by tearing down its SkyPilot cluster.
 
-        Currently delegates to SkyPilot. Will be reimplemented with
-        direct Vast.ai API calls in the future.
+        The monitor passes the Vast.ai numeric instance ID here, but
+        SkyPilot's ``sky.down()`` expects a *cluster name*.  We resolve
+        the cluster name from the instance label (cached by the most
+        recent ``list_instances()`` call) and pass that to SkyPilot.
+
+        If the label cannot be resolved or doesn't match the expected
+        SkyPilot naming pattern, we fall back to passing the raw
+        ``instance_id`` (which may or may not work, but at least won't
+        silently destroy the wrong cluster).
         """
+        # Look up the Vast.ai label for this instance ID
+        label = self._id_to_label.get(instance_id, '')
+        cluster_name = self._extract_cluster_name(label) if label else None
+
+        if cluster_name:
+            self.logger.info(
+                f"Resolved Vast.ai instance {instance_id} "
+                f"(label={label}) to SkyPilot cluster: {cluster_name}"
+            )
+        else:
+            # Fallback — log a warning so we know something is off
+            self.logger.warning(
+                f"Could not resolve SkyPilot cluster name for Vast.ai "
+                f"instance {instance_id} (label={label!r}). "
+                f"Passing raw instance_id to sky.down() — this may not work."
+            )
+            cluster_name = instance_id
+
         self.logger.debug(
-            "VastCloudProvider.destroy_instance: delegating to SkyPilot"
+            "VastCloudProvider.destroy_instance: delegating to SkyPilot "
+            f"with cluster_name={cluster_name}"
         )
-        return self._skypilot.destroy_instance(instance_id)
+        return self._skypilot.destroy_instance(cluster_name)
 
     def check_configured(self) -> bool:
         """
