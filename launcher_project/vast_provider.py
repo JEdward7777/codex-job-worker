@@ -291,6 +291,37 @@ class VastCloudProvider(CloudProvider):
         m = _SKYPILOT_LABEL_RE.match(label)
         return m.group(1) if m else None
 
+    def _resolve_cluster_name(self, instance_id: str) -> Optional[str]:
+        """
+        Resolve a Vast.ai numeric instance ID to a SkyPilot cluster name.
+
+        First checks the in-memory cache (populated by ``list_instances()``).
+        If the cache misses — e.g. because ``destroy_instance()`` was called
+        without a prior ``list_instances()`` in this process — we call
+        ``list_instances()`` to refresh the cache and try once more.
+
+        Returns:
+            The SkyPilot cluster name, or *None* if the instance ID cannot
+            be resolved (e.g. the instance has no label, or the label
+            doesn't match the expected SkyPilot naming pattern).
+        """
+        # First attempt: use the existing cache
+        label = self._id_to_label.get(instance_id, '')
+        cluster_name = self._extract_cluster_name(label) if label else None
+        if cluster_name:
+            return cluster_name
+
+        # Cache miss — refresh by calling list_instances()
+        self.logger.debug(
+            f"Cache miss for instance {instance_id} "
+            f"(label={label!r}), refreshing instance list..."
+        )
+        self.list_instances()  # repopulates self._id_to_label
+
+        # Second attempt after refresh
+        label = self._id_to_label.get(instance_id, '')
+        return self._extract_cluster_name(label) if label else None
+
     def destroy_instance(self, instance_id: str) -> bool:
         """
         Destroy a Vast.ai instance by tearing down its SkyPilot cluster.
@@ -298,30 +329,31 @@ class VastCloudProvider(CloudProvider):
         The monitor passes the Vast.ai numeric instance ID here, but
         SkyPilot's ``sky.down()`` expects a *cluster name*.  We resolve
         the cluster name from the instance label (cached by the most
-        recent ``list_instances()`` call) and pass that to SkyPilot.
+        recent ``list_instances()`` call, or refreshed on demand) and
+        pass that to SkyPilot.
 
         If the label cannot be resolved or doesn't match the expected
-        SkyPilot naming pattern, we fall back to passing the raw
-        ``instance_id`` (which may or may not work, but at least won't
-        silently destroy the wrong cluster).
+        SkyPilot naming pattern, we **refuse to destroy** and return
+        False.  Passing a raw numeric ID to ``sky.down()`` is dangerous
+        — it either does nothing or can kill the wrong cluster.
         """
-        # Look up the Vast.ai label for this instance ID
-        label = self._id_to_label.get(instance_id, '')
-        cluster_name = self._extract_cluster_name(label) if label else None
+        cluster_name = self._resolve_cluster_name(instance_id)
 
         if cluster_name:
             self.logger.info(
                 f"Resolved Vast.ai instance {instance_id} "
-                f"(label={label}) to SkyPilot cluster: {cluster_name}"
+                f"(label={self._id_to_label.get(instance_id, '')}) "
+                f"to SkyPilot cluster: {cluster_name}"
             )
         else:
-            # Fallback — log a warning so we know something is off
-            self.logger.warning(
-                f"Could not resolve SkyPilot cluster name for Vast.ai "
-                f"instance {instance_id} (label={label!r}). "
-                f"Passing raw instance_id to sky.down() — this may not work."
+            self.logger.error(
+                f"Cannot destroy Vast.ai instance {instance_id}: "
+                f"unable to resolve SkyPilot cluster name "
+                f"(label={self._id_to_label.get(instance_id, '')!r}). "
+                f"Refusing to pass raw numeric ID to sky.down(). "
+                f"Manual cleanup may be required."
             )
-            cluster_name = instance_id
+            return False
 
         self.logger.debug(
             "VastCloudProvider.destroy_instance: delegating to SkyPilot "
