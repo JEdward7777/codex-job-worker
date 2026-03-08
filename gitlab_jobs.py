@@ -47,6 +47,14 @@ DEFAULT_GITLAB_URL = "https://git.genesisrnd.com"
 MANIFEST_PATH = "gpu_jobs/manifest.yaml"
 RESPONSE_FILE_PATH_TEMPLATE = "gpu_jobs/job_{job_id}/response.yaml"
 
+# Default claim timeout: hours after which a claimed job with no heartbeat
+# update is considered stale and eligible for re-claiming.
+DEFAULT_CLAIM_TIMEOUT_HOURS = 24.0
+
+# Default maximum number of times a stale job can be re-claimed before
+# being marked as permanently failed.
+DEFAULT_MAX_JOB_RETRIES = 3
+
 
 class GitLabConnectionError(Exception):
     """Raised when unable to connect to GitLab server."""
@@ -59,6 +67,9 @@ class NoTokenProvidedError(Exception):
 
 class NoJobsAvailableError(Exception):
     """Raised when no jobs are available to claim."""
+
+class MaxRetriesExceededError(Exception):
+    """Raised when a job has exceeded its maximum retry count."""
 
 def retry_with_backoff(max_retries: int = DEFAULT_MAX_RETRIES):
     """
@@ -102,6 +113,53 @@ def retry_with_backoff(max_retries: int = DEFAULT_MAX_RETRIES):
             return func(*args, **kwargs)
         return wrapper
     return decorator
+
+
+def _is_stale_claim(job: Dict[str, Any], claim_timeout_hours: float) -> bool:
+    """
+    Check if a claimed job's heartbeat has gone stale.
+
+    A claim is considered stale when:
+    - The job has a response with a parseable ``timestamp`` field, AND
+    - That timestamp is older than ``claim_timeout_hours``, AND
+    - The response state is not a terminal state (completed/failed/canceled).
+
+    If the timestamp field is missing or unparseable, the claim is NOT
+    considered stale (conservative: avoid stealing from a legitimately
+    running worker that may have older code without the timestamp field).
+
+    Args:
+        job: Job dictionary with ``response`` sub-dict from get_job_status().
+        claim_timeout_hours: Hours after which a claim is considered stale.
+
+    Returns:
+        True if the claim is stale and the job should be treated as unclaimed.
+    """
+    response = job.get('response')
+    if not response or not isinstance(response, dict):
+        return False
+
+    # Terminal states are never stale — they're done
+    state = response.get('state', '')
+    if state in ('completed', 'failed', 'canceled'):
+        return False
+
+    # If no timestamp, don't consider stale (conservative)
+    timestamp_str = response.get('timestamp')
+    if not timestamp_str:
+        return False
+
+    try:
+        ts = datetime.fromisoformat(timestamp_str)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        # Unparseable timestamp — don't consider stale
+        return False
+
+    now = datetime.now(timezone.utc)
+    age_hours = (now - ts).total_seconds() / 3600
+    return age_hours >= claim_timeout_hours
 
 
 class GitLabJobScanner:
@@ -369,16 +427,31 @@ class GitLabJobScanner:
         self._log(f"Scan complete. Scanned {len(all_projects)} projects.")
         return all_projects
 
-    def list_available_jobs(self, include_claimed: bool = False) -> List[Dict[str, Any]]:
+    def list_available_jobs(
+        self,
+        include_claimed: bool = False,
+        claim_timeout_hours: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
         """
         List GPU jobs.
 
         By default, lists only available (unclaimed, non-canceled) jobs.
         With include_claimed=True, also includes claimed jobs.
 
+        When ``claim_timeout_hours`` is set, claimed jobs whose last heartbeat
+        timestamp is older than the timeout are treated as unclaimed (stale
+        claims).  These jobs will have ``is_stale_claim=True`` set on them and
+        the existing ``retry_count`` carried forward from the old response.
+        If the response has no parseable timestamp, the claim is NOT considered
+        stale (conservative — avoids stealing from a legitimately running
+        worker).
+
         Args:
             include_claimed: If True, include claimed jobs in the results.
                            Canceled jobs are always excluded.
+            claim_timeout_hours: Hours after which a claimed job with no
+                                 heartbeat update is considered stale and
+                                 treated as unclaimed.  None = no timeout.
 
         Returns:
             List of job dictionaries (same format as from get_job_status)
@@ -397,8 +470,25 @@ class GitLabJobScanner:
                 if job.get('canceled') is True:
                     continue
 
+                is_claimed = job.get('is_claimed') is True
+
+                # Check for stale claims
+                if is_claimed and claim_timeout_hours is not None:
+                    if _is_stale_claim(job, claim_timeout_hours):
+                        # Treat as unclaimed — carry forward retry_count
+                        response = job.get('response') or {}
+                        job['is_stale_claim'] = True
+                        job['retry_count'] = response.get('retry_count', 0)
+                        self._log(
+                            f"Job {job.get('job_id')} in project "
+                            f"{job.get('project_id')} has stale claim "
+                            f"(retry_count={job['retry_count']})"
+                        )
+                        # Mark as effectively unclaimed for filtering below
+                        is_claimed = False
+
                 # Skip claimed jobs unless include_claimed is set
-                if job.get('is_claimed') is True and not include_claimed:
+                if is_claimed and not include_claimed:
                     continue
 
                 # Job passes filters - add it
@@ -768,23 +858,32 @@ class GitLabJobScanner:
         self,
         project_id: int,
         job_id: str,
-        worker_id: str
+        worker_id: str,
+        is_stale_claim: bool = False,
+        retry_count: int = 0,
     ) -> Dict[str, Any]:
         """
-        Claim a job by creating a response.yaml file in the job's directory.
+        Claim a job by creating (or overwriting) a response.yaml file.
 
-        This method attempts to claim a job by creating the claim file at:
-        gpu_jobs/job_{job_id}/response.yaml
+        For fresh claims, this creates a new ``response.yaml`` at
+        ``gpu_jobs/job_{job_id}/response.yaml``.  If the file already exists,
+        ``GitlabCreateError`` is raised (race-condition safe).
 
-        After creating the file, it verifies the claim by reading back the
-        response.yaml and checking that the worker_id matches. If the job is
-        not yet claimed (is_claimed=False), it retries up to MAX_JOB_CLAIM_RETRY
-        times. If another worker claimed it, raises GitlabCreateError immediately.
+        For stale re-claims (``is_stale_claim=True``), the existing
+        ``response.yaml`` is overwritten via ``update_file()`` with the new
+        worker's ID and an incremented ``retry_count``.
+
+        After writing the file, the claim is verified by reading back
+        ``response.yaml`` and checking that the ``worker_id`` matches.
 
         Args:
             project_id: GitLab project ID
             job_id: Job ID to claim
             worker_id: Unique identifier for this worker
+            is_stale_claim: If True, overwrite the existing response.yaml
+                            instead of creating a new one.
+            retry_count: Current retry count from the stale response.
+                         Will be incremented and written to the new response.
 
         Returns:
             Dictionary containing the claimed job status (from get_job_status):
@@ -792,36 +891,55 @@ class GitLabJobScanner:
             - project_id: The project ID
             - is_claimed: True
             - response: Dict with response.yaml content including worker_id
+              and retry_count
 
         Raises:
-            GitlabCreateError: If the claim file already exists or another worker claimed it
+            GitlabCreateError: If the claim file already exists (fresh claim)
+                               or another worker claimed it
             GitlabGetError: If project not found or other API errors
         """
         for attempt in range(MAX_JOB_CLAIM_RETRY):
             # Build the claim file path
             claim_file_path = RESPONSE_FILE_PATH_TEMPLATE.format(job_id=job_id)
 
-            # Create response.yaml content
+            # Build response.yaml content with retry_count
+            new_retry_count = retry_count + 1 if is_stale_claim else 1
             response_data = {
                 'worker_id': worker_id,
                 'state': 'running',
-                'timestamp': datetime.now(timezone.utc).isoformat()
+                'timestamp': datetime.now(timezone.utc).isoformat(),
+                'retry_count': new_retry_count,
             }
 
             # Convert to YAML
             yaml_content = yaml.dump(response_data, default_flow_style=False, sort_keys=False)
 
             # Create commit message
-            commit_message = f"Worker {worker_id} claims job {job_id}"
+            if is_stale_claim:
+                commit_message = (
+                    f"Worker {worker_id} re-claims stale job {job_id} "
+                    f"(retry {new_retry_count})"
+                )
+            else:
+                commit_message = f"Worker {worker_id} claims job {job_id}"
 
-            # Attempt to create the claim file
-            # If it already exists, GitlabCreateError will be raised
-            self._create_repository_file(
-                project_id=project_id,
-                file_path=claim_file_path,
-                content=yaml_content,
-                commit_message=commit_message
-            )
+            # Write the claim file
+            if is_stale_claim:
+                # Overwrite existing stale response.yaml
+                self._update_repository_file(
+                    project_id=project_id,
+                    file_path=claim_file_path,
+                    content=yaml_content,
+                    commit_message=commit_message,
+                )
+            else:
+                # Fresh claim — create new file (fails if already exists)
+                self._create_repository_file(
+                    project_id=project_id,
+                    file_path=claim_file_path,
+                    content=yaml_content,
+                    commit_message=commit_message,
+                )
 
             # Verify the claim by reading back the status
             job_status = self.get_job_status(project_id, job_id)
@@ -846,13 +964,15 @@ class GitLabJobScanner:
 
     def claim_next_job(
         self,
-        worker_id: str
+        worker_id: str,
+        claim_timeout_hours: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
         Attempt to claim the next available job, prioritized by submission time.
 
         This method:
-        1. Gets list of available jobs
+        1. Gets list of available jobs (including stale-claimed jobs when
+           ``claim_timeout_hours`` is set)
         2. Sorts them by submitted_at (oldest first) for fair FIFO ordering.
            Jobs without submitted_at are shuffled randomly and placed at the back.
         3. Iterates through them attempting to claim each
@@ -860,6 +980,10 @@ class GitLabJobScanner:
 
         Args:
             worker_id: Unique identifier for this worker
+            claim_timeout_hours: Hours after which a claimed job with no
+                                 heartbeat update is considered stale and
+                                 eligible for re-claiming.  None = no timeout
+                                 (only truly unclaimed jobs are returned).
 
         Returns:
             Dictionary containing the claimed job with:
@@ -867,13 +991,16 @@ class GitLabJobScanner:
             - project_id: The project ID
             - is_claimed: True
             - response: Dict with response.yaml content including worker_id
+              and retry_count
 
         Raises:
             NoJobsAvailableError: If no jobs are available to claim
             GitlabGetError: If project not found or other API errors
         """
         self._log("Fetching available jobs...")
-        available_jobs = self.list_available_jobs()
+        available_jobs = self.list_available_jobs(
+            claim_timeout_hours=claim_timeout_hours,
+        )
 
         # Fair job ordering: FIFO by submitted_at (oldest first).
         # Jobs without submitted_at get a high default so they sort to the back.
@@ -890,8 +1017,16 @@ class GitLabJobScanner:
         for job_entry in available_jobs:
             project_id = job_entry['project_id']
             job_id = job_entry['job_id']
+            stale = job_entry.get('is_stale_claim', False)
+            prev_retry_count = job_entry.get('retry_count', 0)
 
-            self._log(f"Attempting to claim job {job_id} in project {project_id}...")
+            if stale:
+                self._log(
+                    f"Attempting to re-claim stale job {job_id} in project "
+                    f"{project_id} (retry_count={prev_retry_count})..."
+                )
+            else:
+                self._log(f"Attempting to claim job {job_id} in project {project_id}...")
 
             try:
                 # Attempt to claim the job (includes verification)
@@ -899,7 +1034,9 @@ class GitLabJobScanner:
                 job_status = self.claim_job(
                     project_id=project_id,
                     job_id=job_id,
-                    worker_id=worker_id
+                    worker_id=worker_id,
+                    is_stale_claim=stale,
+                    retry_count=prev_retry_count,
                 )
 
                 self._log(f"Successfully claimed job {job_id}")

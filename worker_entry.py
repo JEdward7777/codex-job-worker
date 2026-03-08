@@ -28,7 +28,15 @@ from datetime import datetime, timezone
 import yaml
 
 from gitlab.exceptions import GitlabCreateError
-from gitlab_jobs import GitLabJobScanner, NoJobsAvailableError, DEFAULT_GITLAB_URL, RESPONSE_FILE_PATH_TEMPLATE
+from gitlab_jobs import (
+    GitLabJobScanner,
+    NoJobsAvailableError,
+    MaxRetriesExceededError,
+    DEFAULT_GITLAB_URL,
+    DEFAULT_CLAIM_TIMEOUT_HOURS,
+    DEFAULT_MAX_JOB_RETRIES,
+    RESPONSE_FILE_PATH_TEMPLATE,
+)
 
 
 # Exit code that signals the calling bash wrapper to git-pull and restart
@@ -87,6 +95,10 @@ class JobCallbacks:
         self._last_heartbeat = 0  # Force first heartbeat to always push
         self._last_stage = None
         self._epochs_completed = 0
+        # Carry forward retry_count from the claim response so heartbeat
+        # updates don't lose it.
+        response = job_context.get('response') or {}
+        self._retry_count = response.get('retry_count')
 
     def heartbeat(self, epochs_completed: Optional[int] = None, message: Optional[str] = None, stage: Optional[str] = None):
         """
@@ -165,6 +177,10 @@ class JobCallbacks:
             'state': state,
             'timestamp': datetime.now(timezone.utc).isoformat()
         }
+
+        # Preserve retry_count across heartbeat updates
+        if self._retry_count is not None:
+            response_data['retry_count'] = self._retry_count
 
         if epochs_completed is not None:
             response_data['epochs_completed'] = epochs_completed
@@ -586,6 +602,30 @@ def main():
         )
     )
 
+    # Stale claim timeout
+    parser.add_argument(
+        '--claim-timeout-hours',
+        type=float,
+        default=float(os.environ.get('CLAIM_TIMEOUT_HOURS', str(DEFAULT_CLAIM_TIMEOUT_HOURS))),
+        help=(
+            'Hours after which a claimed job with no heartbeat update is '
+            'considered stale and eligible for re-claiming '
+            '(or set CLAIM_TIMEOUT_HOURS env var)'
+        )
+    )
+
+    # Max job retries for stale re-claims
+    parser.add_argument(
+        '--max-job-retries',
+        type=int,
+        default=int(os.environ.get('MAX_JOB_RETRIES', str(DEFAULT_MAX_JOB_RETRIES))),
+        help=(
+            'Maximum number of times a stale job can be re-claimed before '
+            'being marked as permanently failed '
+            '(or set MAX_JOB_RETRIES env var)'
+        )
+    )
+
     args = parser.parse_args()
 
     # Validate required arguments
@@ -614,6 +654,8 @@ def main():
     if args.enable_return_update:
         print(f"Return-Update Mode: enabled (exit code {EXIT_CODE_UPDATE_RESTART} = restart)")
     print(f"Keep Jobs: {args.keep_jobs}")
+    print(f"Claim Timeout: {args.claim_timeout_hours}h")
+    print(f"Max Job Retries: {args.max_job_retries}")
     print("=" * 60)
     print()
 
@@ -692,9 +734,21 @@ def main():
             else:
                 # === NORMAL MODE: scan and claim next available job ===
                 print("Scanning for available jobs...")
-                job = scanner.claim_next_job(args.worker_id)
+                job = scanner.claim_next_job(
+                    args.worker_id,
+                    claim_timeout_hours=args.claim_timeout_hours,
+                )
 
                 print(f"Claimed job: {job['job_id']}")
+
+                # Check retry count — fail the job if it has exceeded max retries
+                response = job.get('response') or {}
+                retry_count = response.get('retry_count', 1)
+                if retry_count > args.max_job_retries:
+                    raise MaxRetriesExceededError(
+                        f"Job {job['job_id']} has exceeded maximum retries "
+                        f"({retry_count}/{args.max_job_retries})"
+                    )
 
                 success = process_job(job, scanner, args.worker_id, work_dir)
 
@@ -710,6 +764,35 @@ def main():
                 if args.enable_return_update:
                     print(f"Return-update mode: exiting with code {EXIT_CODE_UPDATE_RESTART} for restart.")
                     sys.exit(EXIT_CODE_UPDATE_RESTART)
+
+        except MaxRetriesExceededError as e:
+            # Job has been re-claimed too many times — mark it as permanently failed
+            print(f"ERROR: {e}")
+            try:
+                job_id = job['job_id']
+                project_id = job['project_id']
+                response_path = RESPONSE_FILE_PATH_TEMPLATE.format(job_id=job_id)
+                fail_response = {
+                    'worker_id': args.worker_id,
+                    'state': 'failed',
+                    'timestamp': datetime.now(timezone.utc).isoformat(),
+                    'retry_count': (job.get('response') or {}).get('retry_count', 0),
+                    'error_message': str(e),
+                }
+                scanner.update_file(
+                    project_id=project_id,
+                    file_path=response_path,
+                    content=yaml.dump(fail_response, default_flow_style=False, sort_keys=False),
+                    commit_message=f"Worker {args.worker_id} marks job {job_id} as failed (max retries exceeded)",
+                )
+                print(f"Marked job {job_id} as failed (max retries exceeded)")
+            except Exception as fail_err:
+                print(f"Warning: Failed to mark job as failed: {fail_err}", file=sys.stderr)
+
+            # Continue to next job (don't exit the loop)
+            if args.enable_return_update:
+                print(f"Return-update mode: exiting with code {EXIT_CODE_UPDATE_RESTART} for restart.")
+                sys.exit(EXIT_CODE_UPDATE_RESTART)
 
         except NoJobsAvailableError:
             print("No jobs available.")

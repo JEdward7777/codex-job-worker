@@ -57,7 +57,11 @@ from dotenv import load_dotenv  # pylint: disable=import-error
 
 # Add parent directory to path so we can import gitlab_jobs
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-from gitlab_jobs import GitLabJobScanner  # noqa: E402  # pylint: disable=import-error
+from gitlab_jobs import (  # noqa: E402  # pylint: disable=import-error
+    GitLabJobScanner,
+    DEFAULT_CLAIM_TIMEOUT_HOURS,
+    _is_stale_claim,
+)
 
 from cloud_provider import CloudProvider, InstanceInfo  # noqa: E402  # pylint: disable=import-error
 
@@ -179,14 +183,18 @@ def count_active_jobs(
     scanner: GitLabJobScanner,
     logger: logging.Logger,
     all_projects: Optional[List[Dict]] = None,
+    claim_timeout_hours: Optional[float] = None,
 ) -> int:
     """
-    Count jobs that are in pending or running state.
+    Count jobs that need a worker launched for them.
 
-    Active = not completed, not failed, not canceled.
+    Only **unclaimed** jobs are counted.  Claimed jobs already have (or had)
+    a worker assigned and don't need a new VM.  However, when
+    ``claim_timeout_hours`` is set, claimed jobs whose heartbeat timestamp
+    is older than the timeout are treated as stale and counted as if they
+    were unclaimed — they need a new worker to pick them up.
 
-    Uses list_available_jobs(include_claimed=True) to get both pending and
-    running jobs (excluding canceled), then filters out completed and failed.
+    Jobs in terminal states (completed, failed, canceled) are always excluded.
 
     Args:
         scanner: GitLabJobScanner instance.
@@ -194,9 +202,12 @@ def count_active_jobs(
         all_projects: Optional pre-scanned project data from scanner.scan_all_projects().
                       If provided, jobs are extracted from this data instead of
                       re-scanning GitLab. If None, scanner.list_available_jobs() is called.
+        claim_timeout_hours: Hours after which a claimed job with no heartbeat
+                             update is considered stale and counted as active.
+                             None = stale claim detection disabled.
 
     Returns:
-        Number of active (pending or running) jobs.
+        Number of jobs that need a worker (unclaimed + stale-claimed).
     """
     try:
         if all_projects is not None:
@@ -219,17 +230,31 @@ def count_active_jobs(
         return 0
 
     active_count = 0
+    stale_count = 0
     for job in all_jobs:
-        # Check response state — if claimed, look at the response
+        # Skip terminal states
         response = job.get('response')
         if response and isinstance(response, dict):
             state = response.get('state', '')
             if state in ('completed', 'failed', 'canceled'):
                 continue
 
-        active_count += 1
+        is_claimed = job.get('is_claimed') is True
 
-    logger.info(f"Found {active_count} active jobs ({len(all_jobs)} total non-canceled)")
+        if is_claimed:
+            # Claimed jobs are only counted if their claim is stale
+            if claim_timeout_hours is not None and _is_stale_claim(job, claim_timeout_hours):
+                active_count += 1
+                stale_count += 1
+            # else: claimed with active heartbeat — skip (worker is handling it)
+        else:
+            # Unclaimed job — needs a worker
+            active_count += 1
+
+    logger.info(
+        f"Found {active_count} jobs needing workers "
+        f"({stale_count} stale-claimed, {len(all_jobs)} total non-canceled)"
+    )
     return active_count
 
 
@@ -470,6 +495,7 @@ class Monitor:
         cloud_provider: Optional[str] = None,
         project_unshare_hours: Optional[float] = None,
         stale_projects_file: Optional[str] = None,
+        claim_timeout_hours: Optional[float] = None,
         verbose: bool = False,
     ):
         """
@@ -500,6 +526,11 @@ class Monitor:
                                    .env or 24). Set to 0 to disable stale project cleanup.
             stale_projects_file: Path to the JSON file tracking stale projects
                                  (default: from .env or stale_projects.json).
+            claim_timeout_hours: Hours after which a claimed job with no heartbeat
+                                 update is considered stale and eligible for re-claiming
+                                 (default: from .env or 24). Stale-claimed jobs are
+                                 counted as needing workers and will be re-claimed by
+                                 the next available worker.
             verbose: Enable verbose GitLab scanning output.
         """
         # Load .env file (does not override existing env vars)
@@ -524,6 +555,10 @@ class Monitor:
         stale_projects_file = stale_projects_file or os.environ.get(
             'STALE_PROJECTS_FILE', DEFAULT_STALE_PROJECTS_FILE
         )
+        claim_timeout_hours = (
+            claim_timeout_hours if claim_timeout_hours is not None
+            else float(os.environ.get('CLAIM_TIMEOUT_HOURS', str(DEFAULT_CLAIM_TIMEOUT_HOURS)))
+        )
 
         # Setup logging
         logger = setup_logging(log_file)
@@ -534,7 +569,8 @@ class Monitor:
                      f"max_workers={max_workers}, min_workers={min_workers}, "
                      f"jobs_per_worker={jobs_per_worker}, idle_minutes={idle_minutes}, "
                      f"init_timeout={init_timeout}s, worker_yaml={worker_yaml}, "
-                     f"project_unshare_hours={project_unshare_hours}h")
+                     f"project_unshare_hours={project_unshare_hours}h, "
+                     f"claim_timeout_hours={claim_timeout_hours}h")
 
         # --- Preflight checks ---
 
@@ -577,7 +613,11 @@ class Monitor:
 
         # Scan all projects once — reuse for both job counting and stale project tracking
         all_projects = scanner.scan_all_projects()
-        active_jobs = count_active_jobs(scanner, logger, all_projects=all_projects)
+        active_jobs = count_active_jobs(
+            scanner, logger,
+            all_projects=all_projects,
+            claim_timeout_hours=claim_timeout_hours,
+        )
 
         # --- Step 1b: Clean up stale shared projects ---
 
