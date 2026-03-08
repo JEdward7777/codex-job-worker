@@ -30,8 +30,8 @@
 # Cron example (every 10 minutes):
 #   */10 * * * * cd /path/to/launcher_project && bash run_monitor_cron.sh >> /var/log/monitor_cron.log 2>&1
 #
-# Or with a lock file to prevent overlapping runs:
-#   */10 * * * * flock -n /tmp/monitor.lock -c 'cd /path/to/launcher_project && bash run_monitor_cron.sh' >> /var/log/monitor_cron.log 2>&1
+# Or with a lock file and timeout to prevent overlapping/hung runs:
+#   */10 * * * * flock -n /tmp/monitor.lock -c 'cd /path/to/launcher_project && timeout 7200 bash run_monitor_cron.sh' >> /var/log/monitor_cron.log 2>&1
 #
 # First-time setup on the monitor VM:
 #   1. Clone the repo:
@@ -56,7 +56,7 @@
 #
 #   7. Add to cron:
 #      crontab -e
-#      # Add: */10 * * * * flock -n /tmp/monitor.lock -c 'cd /path/to/codex-job-worker/launcher_project && bash run_monitor_cron.sh' >> /var/log/monitor_cron.log 2>&1
+#      # Add: */10 * * * * flock -n /tmp/monitor.lock -c 'cd /path/to/codex-job-worker/launcher_project && timeout 7200 bash run_monitor_cron.sh' >> /var/log/monitor_cron.log 2>&1
 #
 # ===========================================================================
 

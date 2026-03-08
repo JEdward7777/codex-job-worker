@@ -14,10 +14,16 @@ Usage:
 
 import logging
 import subprocess
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from cloud_provider import CloudProvider, InstanceInfo  # pylint: disable=import-error
+
+# Timeout (seconds) for SkyPilot Python API calls (sky.status, sky.get, sky.down).
+# These calls query the cloud provider and can hang if the API server or
+# cloud is unresponsive.
+_SKY_API_TIMEOUT = 60
 
 
 class SkyPilotProvider(CloudProvider):
@@ -31,21 +37,57 @@ class SkyPilotProvider(CloudProvider):
     def __init__(self, logger: Optional[logging.Logger] = None):
         self.logger = logger or logging.getLogger(__name__)
 
+    @staticmethod
+    def _sky_status_with_timeout(refresh_mode, timeout: int):
+        """Run sky.status + sky.get in a thread with a timeout.
+
+        SkyPilot's Python API calls can hang indefinitely if the API
+        server or cloud provider is unresponsive.  We run them in a
+        separate thread so we can enforce a wall-clock timeout.
+
+        Args:
+            refresh_mode: sky.StatusRefreshMode value.
+            timeout: Maximum seconds to wait.
+
+        Returns:
+            The cluster list returned by sky.get().
+
+        Raises:
+            FuturesTimeoutError: If the call exceeds *timeout* seconds.
+            Any exception raised by sky.status() or sky.get().
+        """
+        import sky  # pylint: disable=import-error
+
+        def _do():
+            request_id = sky.status(refresh=refresh_mode)
+            return sky.get(request_id)
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_do)
+            return future.result(timeout=timeout)
+
     def list_instances(self, prefix: str = '') -> Optional[List[InstanceInfo]]:
         """
         List SkyPilot clusters, optionally filtered by name prefix.
 
         Uses AUTO refresh mode to query the cloud provider for accurate
         status. Falls back to NONE (cached) if AUTO fails with the
-        Vast.ai fileno bug.
+        Vast.ai fileno bug.  All SkyPilot API calls are wrapped with a
+        timeout to prevent indefinite hangs.
         """
         try:
             import sky  # pylint: disable=import-error
 
             # Try AUTO first — queries the cloud for accurate status.
             try:
-                request_id = sky.status(refresh=sky.StatusRefreshMode.AUTO)
-                clusters = sky.get(request_id)
+                clusters = self._sky_status_with_timeout(
+                    sky.StatusRefreshMode.AUTO, _SKY_API_TIMEOUT
+                )
+            except FuturesTimeoutError:
+                self.logger.error(
+                    f"sky.status(AUTO) timed out after {_SKY_API_TIMEOUT}s"
+                )
+                return None
             except Exception as auto_err:
                 # AUTO fails with "fileno" error on Vast.ai in the API
                 # server context. Fall back to NONE (cached status).
@@ -53,8 +95,15 @@ class SkyPilotProvider(CloudProvider):
                     f"sky.status(AUTO) failed ({auto_err}), "
                     f"falling back to cached status"
                 )
-                request_id = sky.status(refresh=sky.StatusRefreshMode.NONE)
-                clusters = sky.get(request_id)
+                try:
+                    clusters = self._sky_status_with_timeout(
+                        sky.StatusRefreshMode.NONE, _SKY_API_TIMEOUT
+                    )
+                except FuturesTimeoutError:
+                    self.logger.error(
+                        f"sky.status(NONE) timed out after {_SKY_API_TIMEOUT}s"
+                    )
+                    return None
         except Exception as e:
             self.logger.error(f"Failed to get sky status: {e}")
             return None
@@ -169,16 +218,28 @@ class SkyPilotProvider(CloudProvider):
                 cmd.append('--detach-run')
 
             # Run the command
-            if stream:
-                result = subprocess.run(cmd, check=False)
-            else:
-                result = subprocess.run(
-                    cmd,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    check=False,
+            # Timeouts prevent indefinite hangs if provisioning stalls.
+            # - stream=True (interactive test_launch): 30 min max
+            # - stream=False (monitor cycle with --detach-run): 10 min max
+            #   (provisioning ~4 min, --detach-run returns once run phase starts)
+            try:
+                if stream:
+                    result = subprocess.run(cmd, check=False, timeout=1800)
+                else:
+                    result = subprocess.run(
+                        cmd,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        check=False,
+                        timeout=600,
+                    )
+            except subprocess.TimeoutExpired:
+                self.logger.error(
+                    f"sky launch timed out for cluster {name} "
+                    f"({'streaming' if stream else 'detached'} mode)"
                 )
+                return None
 
             if result.returncode != 0:
                 error_msg = (result.stderr if not stream and result.stderr
@@ -201,15 +262,28 @@ class SkyPilotProvider(CloudProvider):
         Tear down a SkyPilot cluster.
 
         Uses the Python API with follow=False (fire-and-forget) to avoid
-        fileno errors.
+        fileno errors.  Wrapped with a timeout to prevent indefinite hangs.
         """
         try:
             import sky  # pylint: disable=import-error
             self.logger.info(f"Tearing down cluster: {instance_id}")
-            request_id = sky.down(instance_id)
-            sky.stream_and_get(request_id, follow=False)
+
+            def _do_down():
+                request_id = sky.down(instance_id)
+                sky.stream_and_get(request_id, follow=False)
+
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(_do_down)
+                future.result(timeout=_SKY_API_TIMEOUT)
+
             self.logger.info(f"Tear down initiated: {instance_id}")
             return True
+        except FuturesTimeoutError:
+            self.logger.error(
+                f"sky.down timed out after {_SKY_API_TIMEOUT}s "
+                f"for cluster {instance_id}"
+            )
+            return False
         except Exception as e:
             self.logger.error(f"Failed to tear down {instance_id}: {e}")
             return False

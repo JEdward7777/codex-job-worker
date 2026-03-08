@@ -221,7 +221,7 @@ class GitLabJobScanner:
         """
         try:
             self._log(f"Connecting to GitLab at {self.gitlab_url}...")
-            gl = gitlab.Gitlab(self.gitlab_url, private_token=self.token)
+            gl = gitlab.Gitlab(self.gitlab_url, private_token=self.token, timeout=30)
 
             # Verify authentication by getting current user
             gl.auth()
