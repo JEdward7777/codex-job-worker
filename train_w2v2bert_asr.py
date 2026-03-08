@@ -639,6 +639,10 @@ def train_w2v2bert_asr_api(
             gradient_accumulation_steps=gradient_accumulation_steps,
             eval_strategy=eval_strategy,
             save_strategy=eval_strategy,  # must match eval_strategy for load_best_model_at_end
+            # Move prediction logits to CPU every N eval steps to prevent OOM
+            # during evaluation. Without this, the Trainer accumulates all logits
+            # on GPU which can exceed VRAM for large vocabularies/datasets.
+            eval_accumulation_steps=1,
             logging_steps=logging_steps,
             learning_rate=learning_rate,
             num_train_epochs=num_train_epochs,
@@ -974,6 +978,10 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         eval_strategy=args.eval_strategy,
         save_strategy=args.eval_strategy,
+        # Move prediction logits to CPU every N eval steps to prevent OOM
+        # during evaluation. Without this, the Trainer accumulates all logits
+        # on GPU which can exceed VRAM for large vocabularies/datasets.
+        eval_accumulation_steps=1,
         logging_steps=args.logging_steps,
         learning_rate=args.learning_rate,
         num_train_epochs=args.num_train_epochs,
