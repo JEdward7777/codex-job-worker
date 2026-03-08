@@ -37,6 +37,7 @@ from gitlab_jobs import (
     DEFAULT_MAX_JOB_RETRIES,
     RESPONSE_FILE_PATH_TEMPLATE,
 )
+from handlers.base import get_git_commit_hash
 
 
 # Exit code that signals the calling bash wrapper to git-pull and restart
@@ -428,6 +429,7 @@ def process_job(
     print(f"Processing Job: {job_id}")
     print(f"Project ID: {project_id}")
     print(f"Work Directory: {work_dir}")
+    print(f"Git Commit: {get_git_commit_hash()}")
     print(f"Started: {datetime.now().isoformat()}")
     print("=" * 60)
 

@@ -4,12 +4,37 @@ Base utilities for job handlers.
 This module provides shared functionality used by all handlers.
 """
 
+import subprocess
 import time
 import tarfile
 import unicodedata
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Union
+
+def get_git_commit_hash() -> str:
+    """
+    Return the short git commit hash of the current HEAD.
+
+    Runs ``git rev-parse --short HEAD`` from the directory containing this
+    file (i.e. the repository root or a subdirectory of it).  If the
+    command fails for any reason (not a git repo, git not installed, etc.)
+    the function returns the string ``"unknown"``.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            cwd=str(Path(__file__).resolve().parent.parent),
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
 
 # File extensions that should be uploaded via Git LFS
 LFS_EXTENSIONS = {
