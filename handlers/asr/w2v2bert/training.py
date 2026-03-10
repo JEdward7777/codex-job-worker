@@ -448,9 +448,22 @@ def _download_training_data(
             print(f"    Found {len(pairs)} audio-transcription pairs")
 
             # Download audio files and add to samples
+            download_failures = 0
+            max_consecutive_failures = 10  # Abort if too many consecutive failures
+            consecutive_failures = 0
+
             for pair_i, pair in enumerate(pairs):
                 if pair_i % 100 == 0 or pair_i == len(pairs)-1:
-                    print( f"Downloading pair {pair_i} of {len(pairs)}")
+                    print(f"Downloading pair {pair_i} of {len(pairs)}")
+                    # Send heartbeat during long download sequences so the
+                    # monitor knows the worker is still alive.  Without this,
+                    # a codex file with 1000+ pairs could download for 10+
+                    # minutes without any heartbeat update, making the job
+                    # look stale.
+                    callbacks.heartbeat(
+                        message=f"Downloading audio: {len(samples)} samples so far",
+                        stage="download"
+                    )
 
                 audio_url = pair['audio_url']
                 transcription = pair['transcription']
@@ -464,12 +477,49 @@ def _download_training_data(
                 audio_filename = Path(audio_url).name
                 local_audio_path = audio_dir / audio_filename
 
-                # Download if not already present
-                if not local_audio_path.exists():
+                # Download if not already present (or if existing file is 0 bytes)
+                needs_download = not local_audio_path.exists()
+                if not needs_download and local_audio_path.stat().st_size == 0:
+                    # Previous download left a 0-byte file — re-download
+                    local_audio_path.unlink()
+                    needs_download = True
+
+                if needs_download:
                     if downloader.download_file(audio_url, local_audio_path):
-                        pass  # Success
+                        # Validate the downloaded file is not empty
+                        if local_audio_path.exists() and local_audio_path.stat().st_size == 0:
+                            print(f"    Warning: Downloaded 0-byte file for {verse_id}, skipping")
+                            local_audio_path.unlink(missing_ok=True)
+                            download_failures += 1
+                            consecutive_failures += 1
+                            if consecutive_failures >= max_consecutive_failures:
+                                print(f"    ERROR: {max_consecutive_failures} consecutive download failures, aborting")
+                                return {
+                                    'success': False,
+                                    'metadata_csv': None,
+                                    'sample_count': 0,
+                                    'error_message': (
+                                        f"Too many consecutive download failures ({max_consecutive_failures}). "
+                                        f"GitLab server may be overloaded or unreachable."
+                                    )
+                                }
+                            continue
+                        consecutive_failures = 0  # Reset on success
                     else:
                         print(f"    Warning: Could not download audio for {verse_id}")
+                        download_failures += 1
+                        consecutive_failures += 1
+                        if consecutive_failures >= max_consecutive_failures:
+                            print(f"    ERROR: {max_consecutive_failures} consecutive download failures, aborting")
+                            return {
+                                'success': False,
+                                'metadata_csv': None,
+                                'sample_count': 0,
+                                'error_message': (
+                                    f"Too many consecutive download failures ({max_consecutive_failures}). "
+                                    f"GitLab server may be overloaded or unreachable."
+                                )
+                            }
                         continue
 
                 samples.append({
@@ -477,6 +527,9 @@ def _download_training_data(
                     'transcription': transcription,
                     'verse_id': verse_id
                 })
+
+            if download_failures > 0:
+                print(f"    Note: {download_failures} audio files failed to download (skipped)")
 
             callbacks.heartbeat(message=f"Downloaded {len(samples)} samples", stage="download")
 

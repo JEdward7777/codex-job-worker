@@ -11,6 +11,7 @@ import re
 import os
 import csv
 import json
+import time
 from typing import Dict, List, Optional, Callable, ContextManager, BinaryIO
 import hashlib
 from pathlib import Path
@@ -18,12 +19,13 @@ import base64
 from urllib.parse import quote
 from io import BytesIO
 from contextlib import contextmanager
+import tempfile
+
 import yaml
 import requests
 from requests.adapters import HTTPAdapter
 import fire
 
-import tempfile
 
 from uroman import Uroman
 from gitlab_jobs import DEFAULT_GITLAB_URL
@@ -91,7 +93,7 @@ class GitLabDatasetDownloader:
         # Initialize config - either from file or empty
         if config_path and os.path.exists(config_path):
             print(f"Reading configuration from: {config_path}")
-            with open(config_path, 'r') as f:
+            with open(config_path, 'r', encoding="utf-8") as f:
                 self.config = yaml.safe_load(f) or {}
         else:
             self.config = {}
@@ -302,6 +304,19 @@ class GitLabDatasetDownloader:
             print(f"Error copying {file_path}: {e}")
             return False
 
+    # Default timeout for individual HTTP requests (connect, read) in seconds.
+    # A generous read timeout prevents the worker from hanging indefinitely
+    # when the GitLab server stalls mid-transfer (e.g. due to load or network
+    # issues).  See https://github.com/huggingface/datasets/issues/7164 for
+    # similar timeout issues with large dataset downloads.
+    _DOWNLOAD_TIMEOUT = (10, 120)  # (connect_timeout, read_timeout)
+
+    # Number of retry attempts for transient download failures.
+    _DOWNLOAD_MAX_RETRIES = 3
+
+    # Base delay (seconds) for exponential backoff between retries.
+    _DOWNLOAD_BACKOFF_BASE = 2.0
+
     def download_file_gitlab(self, file_path: str, output_path: Path) -> bool:
         """Download a file from GitLab repository.
 
@@ -309,105 +324,171 @@ class GitLabDatasetDownloader:
         the final path.  This prevents partially-downloaded files from being
         mistaken for complete downloads on subsequent runs.
 
+        Includes retry logic with exponential backoff for transient network
+        errors (timeouts, connection resets, incomplete reads).
+
         Args:
             file_path: Path to file in repository
             output_path: Local path to save file
         """
+
         url = f"{self.server_url}/api/v4/projects/{self.project_id_for_api}/repository/files/{quote(file_path, safe='')}/raw"
         tmp_path = Path(str(output_path) + '.tmp')
 
-        try:
-            # First attempt: regular download
-            response = self.session.get(url, stream=True)
-            response.raise_for_status()
-
-            # Check if this is an LFS pointer file
-            content_start = response.content[:100]
-            if b'version https://git-lfs.github.com/spec/v1' in content_start:
-                # This is an LFS pointer, we need to download via LFS
-                # Parse the LFS pointer to get the OID and size
-                content_text = response.content.decode('utf-8')
-                oid_line = [line for line in content_text.split('\n') if line.startswith('oid sha256:')]
-                size_line = [line for line in content_text.split('\n') if line.startswith('size ')]
-
-                if oid_line and size_line:
-                    oid = oid_line[0].split(':', 1)[1].strip()
-                    size = int(size_line[0].split(' ', 1)[1].strip())
-
-                    # Use GitLab LFS batch API to get download URL
-                    project_path = self._get_project_path_for_lfs()
-                    lfs_batch_url = f"{self.server_url}/{project_path}.git/info/lfs/objects/batch"
-
-                    lfs_batch_payload = {
-                        "operation": "download",
-                        "transfers": ["basic"],
-                        "objects": [
-                            {
-                                "oid": oid,
-                                "size": size
-                            }
-                        ]
-                    }
-
-                    # LFS batch API requires different headers and Basic auth
-                    lfs_headers = {
-                        'Accept': 'application/vnd.git-lfs+json',
-                        'Content-Type': 'application/vnd.git-lfs+json'
-                    }
-
-                    # Use HTTP Basic auth with token as password
-                    batch_response = self.session.post(
-                        lfs_batch_url,
-                        json=lfs_batch_payload,
-                        headers=lfs_headers,
-                        auth=('oauth2', self.access_token)
-                    )
-                    batch_response.raise_for_status()
-                    batch_data = batch_response.json()
-
-                    # Get the download URL from the batch response
-                    if 'objects' in batch_data and len(batch_data['objects']) > 0:
-                        obj = batch_data['objects'][0]
-                        if 'actions' in obj and 'download' in obj['actions']:
-                            download_url = obj['actions']['download']['href']
-                            download_headers = obj['actions']['download'].get('header', {})
-
-                            # Download the actual LFS file to tmp, then rename
-                            lfs_response = self.session.get(download_url, headers=download_headers, stream=True)
-                            lfs_response.raise_for_status()
-
-                            with open(tmp_path, 'wb') as f:
-                                for chunk in lfs_response.iter_content(chunk_size=8192):
-                                    f.write(chunk)
-
-                            os.replace(tmp_path, output_path)
-                            return True
-                        else:
-                            print(f"No download action in LFS batch response for {file_path}")
-                            return False
-                    else:
-                        print(f"No objects in LFS batch response for {file_path}")
-                        return False
+        last_error = None
+        for attempt in range(1, self._DOWNLOAD_MAX_RETRIES + 1):
+            try:
+                result = self._download_file_gitlab_once(url, file_path, tmp_path, output_path)
+                if result:
+                    return True
+                # _download_file_gitlab_once returned False (non-retryable logical error)
+                return False
+            except (requests.ConnectionError, requests.Timeout,
+                    requests.exceptions.ChunkedEncodingError,
+                    ConnectionResetError, OSError) as e:
+                last_error = e
+                if attempt < self._DOWNLOAD_MAX_RETRIES:
+                    backoff = self._DOWNLOAD_BACKOFF_BASE * (2 ** (attempt - 1))
+                    print(f"    Retry {attempt}/{self._DOWNLOAD_MAX_RETRIES} for {file_path}: "
+                          f"{type(e).__name__}: {e}  (waiting {backoff:.0f}s)")
+                    time.sleep(backoff)
                 else:
-                    print(f"Could not parse LFS OID/size from {file_path}")
-                    return False
-            else:
-                # Regular file — write to tmp, then atomic rename
-                with open(tmp_path, 'wb') as f:
-                    f.write(response.content)
+                    print(f"    All {self._DOWNLOAD_MAX_RETRIES} attempts failed for {file_path}: "
+                          f"{type(e).__name__}: {e}")
+            except Exception as e:
+                # Non-retryable error
+                print(f"Error downloading {file_path}: {e}")
+                # Clean up partial tmp file
+                self._cleanup_tmp(tmp_path)
+                return False
 
-                os.replace(tmp_path, output_path)
-                return True
+        # All retries exhausted
+        self._cleanup_tmp(tmp_path)
+        print(f"Error downloading {file_path} after {self._DOWNLOAD_MAX_RETRIES} retries: {last_error}")
+        return False
 
-        except Exception as e:
-            # Clean up partial tmp file on failure
-            if tmp_path.exists():
-                try:
-                    tmp_path.unlink()
-                except OSError:
-                    pass
-            print(f"Error downloading {file_path}: {e}")
+    @staticmethod
+    def _cleanup_tmp(tmp_path: Path) -> None:
+        """Remove a temporary download file if it exists."""
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+    def _download_file_gitlab_once(
+        self, url: str, file_path: str, tmp_path: Path, output_path: Path
+    ) -> bool:
+        """Single attempt to download a file from GitLab.
+
+        Returns True on success, False on non-retryable logical errors.
+        Raises requests exceptions for retryable network errors.
+        """
+        # First attempt: regular download
+        response = self.session.get(url, stream=True, timeout=self._DOWNLOAD_TIMEOUT)
+        response.raise_for_status()
+
+        # Check if this is an LFS pointer file
+        content_start = response.content[:100]
+        if b'version https://git-lfs.github.com/spec/v1' in content_start:
+            return self._download_lfs_file(response.content, file_path, tmp_path, output_path)
+        else:
+            # Regular file — validate content, write to tmp, then atomic rename
+            if len(response.content) == 0:
+                print(f"    Warning: GitLab returned empty content for {file_path}")
+                raise requests.ConnectionError(f"Empty response for {file_path}")
+
+            with open(tmp_path, 'wb') as f:
+                f.write(response.content)
+
+            os.replace(tmp_path, output_path)
+            return True
+
+    def _download_lfs_file(
+        self, pointer_content: bytes, file_path: str, tmp_path: Path, output_path: Path
+    ) -> bool:
+        """Download an LFS-tracked file given its pointer content.
+
+        Returns True on success, False on non-retryable errors.
+        Raises requests exceptions for retryable network errors.
+        """
+        # Parse the LFS pointer to get the OID and size
+        content_text = pointer_content.decode('utf-8')
+        oid_line = [line for line in content_text.split('\n') if line.startswith('oid sha256:')]
+        size_line = [line for line in content_text.split('\n') if line.startswith('size ')]
+
+        if not (oid_line and size_line):
+            print(f"Could not parse LFS OID/size from {file_path}")
             return False
+
+        oid = oid_line[0].split(':', 1)[1].strip()
+        expected_size = int(size_line[0].split(' ', 1)[1].strip())
+
+        # Use GitLab LFS batch API to get download URL
+        project_path = self._get_project_path_for_lfs()
+        lfs_batch_url = f"{self.server_url}/{project_path}.git/info/lfs/objects/batch"
+
+        lfs_batch_payload = {
+            "operation": "download",
+            "transfers": ["basic"],
+            "objects": [{"oid": oid, "size": expected_size}]
+        }
+
+        lfs_headers = {
+            'Accept': 'application/vnd.git-lfs+json',
+            'Content-Type': 'application/vnd.git-lfs+json'
+        }
+
+        batch_response = self.session.post(
+            lfs_batch_url,
+            json=lfs_batch_payload,
+            headers=lfs_headers,
+            auth=('oauth2', self.access_token),
+            timeout=self._DOWNLOAD_TIMEOUT,
+        )
+        batch_response.raise_for_status()
+        batch_data = batch_response.json()
+
+        if 'objects' not in batch_data or len(batch_data['objects']) == 0:
+            print(f"No objects in LFS batch response for {file_path}")
+            return False
+
+        obj = batch_data['objects'][0]
+        if 'actions' not in obj or 'download' not in obj['actions']:
+            print(f"No download action in LFS batch response for {file_path}")
+            return False
+
+        download_url = obj['actions']['download']['href']
+        download_headers = obj['actions']['download'].get('header', {})
+
+        # Download the actual LFS file to tmp, then rename
+        lfs_response = self.session.get(
+            download_url, headers=download_headers, stream=True,
+            timeout=self._DOWNLOAD_TIMEOUT,
+        )
+        lfs_response.raise_for_status()
+
+        bytes_written = 0
+        with open(tmp_path, 'wb') as f:
+            for chunk in lfs_response.iter_content(chunk_size=8192):
+                f.write(chunk)
+                bytes_written += len(chunk)
+
+        # Validate downloaded size matches expected LFS size
+        if bytes_written == 0:
+            self._cleanup_tmp(tmp_path)
+            raise requests.ConnectionError(
+                f"LFS download returned 0 bytes for {file_path} (expected {expected_size})"
+            )
+        if bytes_written != expected_size:
+            self._cleanup_tmp(tmp_path)
+            raise requests.ConnectionError(
+                f"LFS download size mismatch for {file_path}: "
+                f"got {bytes_written}, expected {expected_size}"
+            )
+
+        os.replace(tmp_path, output_path)
+        return True
 
     def download_file(self, file_path: str, output_path: Path) -> bool:
         """Download/copy a file (supports both gitlab and local modes).
