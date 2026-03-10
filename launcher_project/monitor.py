@@ -259,6 +259,351 @@ def count_active_jobs(
 
 
 # ---------------------------------------------------------------------------
+# Orphan instance tracking
+# ---------------------------------------------------------------------------
+
+DEFAULT_ORPHAN_INSTANCES_FILE = 'orphan_instances.json'
+DEFAULT_ORPHAN_INSTANCE_HOURS = 2.0
+# How long a heartbeat must be stale before we consider the instance orphaned.
+# This is separate from claim_timeout_hours (which controls when a *job* is
+# re-claimable).  A shorter value here catches zombie instances faster.
+_HEARTBEAT_STALE_HOURS = 2.0
+
+
+def _build_worker_job_map(
+    all_projects: List[Dict],
+    claim_timeout_hours: float,
+) -> Dict[str, Dict]:
+    """
+    Build a mapping from worker_id → active job for all non-terminal jobs.
+
+    An "active" job is one that:
+    - Is claimed (has a response.yaml with a worker_id)
+    - Is NOT in a terminal state (completed/failed/canceled)
+    - Is NOT canceled in the manifest
+
+    For each active job, we also note whether its heartbeat is stale
+    (timestamp older than ``_HEARTBEAT_STALE_HOURS``) and whether it has
+    a timestamp at all.
+
+    Args:
+        all_projects: Pre-scanned project data from scanner.scan_all_projects().
+        claim_timeout_hours: Hours after which a claimed job with no heartbeat
+                             update is considered stale.
+
+    Returns:
+        Dict mapping worker_id strings to job dicts augmented with:
+        - ``_has_timestamp``: bool — whether the response has a parseable timestamp
+        - ``_heartbeat_stale``: bool — whether the timestamp is older than
+          ``_HEARTBEAT_STALE_HOURS``
+        - ``_claim_stale``: bool — whether the claim is stale per
+          ``claim_timeout_hours``
+    """
+    now = datetime.now(timezone.utc)
+    worker_jobs: Dict[str, Dict] = {}
+
+    for project in all_projects:
+        jobs = project.get('jobs')
+        if not jobs:
+            continue
+
+        for job in jobs:
+            # Skip canceled jobs
+            if job.get('canceled') is True:
+                continue
+
+            # Must be claimed
+            if not job.get('is_claimed'):
+                continue
+
+            response = job.get('response')
+            if not response or not isinstance(response, dict):
+                continue
+
+            # Skip terminal states
+            state = response.get('state', '')
+            if state in ('completed', 'failed', 'canceled'):
+                continue
+
+            worker_id = response.get('worker_id')
+            if not worker_id:
+                continue
+
+            # Check timestamp
+            has_timestamp = False
+            heartbeat_stale = False
+            claim_stale = _is_stale_claim(job, claim_timeout_hours)
+
+            timestamp_str = response.get('timestamp')
+            if timestamp_str:
+                try:
+                    ts = datetime.fromisoformat(timestamp_str)
+                    if ts.tzinfo is None:
+                        ts = ts.replace(tzinfo=timezone.utc)
+                    has_timestamp = True
+                    age_hours = (now - ts).total_seconds() / 3600
+                    heartbeat_stale = age_hours >= _HEARTBEAT_STALE_HOURS
+                except (ValueError, TypeError):
+                    pass
+
+            # Augment the job dict (shallow copy to avoid mutating the original)
+            augmented = dict(job)
+            augmented['_has_timestamp'] = has_timestamp
+            augmented['_heartbeat_stale'] = heartbeat_stale
+            augmented['_claim_stale'] = claim_stale
+
+            worker_jobs[worker_id] = augmented
+
+    return worker_jobs
+
+
+def _is_instance_orphaned(
+    instance: 'InstanceInfo',
+    worker_job_map: Dict[str, Dict],
+    logger: logging.Logger,
+) -> bool:
+    """
+    Determine whether a running instance should be considered orphaned.
+
+    An instance is orphaned if:
+    1. It has NO active job claimed by its worker_id, OR
+    2. Its active job's heartbeat is stale (>_HEARTBEAT_STALE_HOURS) and the
+       job has a timestamp field, OR
+    3. Its active job's claim is stale per claim_timeout_hours and the job
+       has NO timestamp field (conservative fallback).
+
+    Args:
+        instance: The running InstanceInfo to check.
+        worker_job_map: Mapping from worker_id → augmented job dict.
+        logger: Logger instance.
+
+    Returns:
+        True if the instance should be tracked as potentially orphaned.
+    """
+    # Extract the SkyPilot cluster name from the instance name/label.
+    #
+    # For Vast.ai instances, the label is "{cluster}-{host_id}-head"
+    # (e.g., "codex-worker-006479f5-413d3bc4-head") and we need to
+    # extract the cluster name ("codex-worker-006479f5") which matches
+    # the worker_id passed to the worker process.
+    #
+    # For pure SkyPilot instances, the name IS the cluster name directly.
+    #
+    # We try the Vast.ai pattern first; if it doesn't match, fall back
+    # to using the raw name.
+    import re
+    _label_re = re.compile(r'^(.+)-[0-9a-f]{8}-head$')
+    m = _label_re.match(instance.name)
+    cluster_name = m.group(1) if m else instance.name
+
+    # Look up the job for this worker
+    job = worker_job_map.get(cluster_name)
+
+    if job is None:
+        # Tier 3: No active job at all — instance is idle/orphaned
+        logger.debug(
+            f"Instance {instance.name} ({instance.id}): no active job "
+            f"for worker_id={cluster_name} — orphaned"
+        )
+        return True
+
+    has_timestamp = job.get('_has_timestamp', False)
+    heartbeat_stale = job.get('_heartbeat_stale', False)
+    claim_stale = job.get('_claim_stale', False)
+
+    if has_timestamp and heartbeat_stale:
+        # Tier 1: Has timestamp but it's stale — worker is likely dead
+        logger.debug(
+            f"Instance {instance.name} ({instance.id}): heartbeat stale "
+            f"for job {job.get('job_id')} — orphaned"
+        )
+        return True
+
+    if not has_timestamp and claim_stale:
+        # Tier 2: No timestamp (old worker code) and claim is stale
+        logger.debug(
+            f"Instance {instance.name} ({instance.id}): no timestamp and "
+            f"claim stale for job {job.get('job_id')} — orphaned"
+        )
+        return True
+
+    # Instance has an active, non-stale job — not orphaned
+    return False
+
+
+def _load_orphan_instances(file_path: str) -> Dict[str, str]:
+    """
+    Load the orphan instances tracking file.
+
+    The file maps instance_id (as string) -> ISO timestamp of when the
+    instance was first observed as orphaned.
+
+    Args:
+        file_path: Path to the JSON tracking file.
+
+    Returns:
+        Dictionary mapping instance_id strings to ISO timestamp strings.
+        Returns empty dict if file doesn't exist or is invalid.
+    """
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return {}
+
+
+def _save_orphan_instances(file_path: str, data: Dict[str, str]) -> None:
+    """
+    Save the orphan instances tracking file.
+
+    Args:
+        file_path: Path to the JSON tracking file.
+        data: Dictionary mapping instance_id strings to ISO timestamp strings.
+    """
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2, sort_keys=True)
+
+
+def cleanup_orphan_instances(
+    instances: List['InstanceInfo'],
+    worker_job_map: Dict[str, Dict],
+    provider: 'CloudProvider',
+    orphan_file: str,
+    orphan_hours: float,
+    logger: logging.Logger,
+    dry_run: bool = False,
+    already_torn_down: Optional[set] = None,
+) -> set:
+    """
+    Track and clean up orphan instances (running but no active job).
+
+    This function mirrors the stale project cleanup pattern:
+    1. Loads the orphan instances tracking file
+    2. For each running instance, checks if it's orphaned
+    3. If not orphaned: removes it from the tracker (resets timer)
+    4. If orphaned: adds it to the tracker with current timestamp
+       (or keeps existing timestamp if already tracked)
+    5. If an instance has been orphaned for longer than orphan_hours:
+       destroys it
+    6. Removes entries for instances that are no longer running
+       (handles instances that self-terminated or were manually destroyed)
+    7. Saves the updated tracking file
+
+    Args:
+        instances: List of all InstanceInfo objects from the cloud provider.
+        worker_job_map: Mapping from worker_id → augmented job dict.
+        provider: Cloud provider for destroying instances.
+        orphan_file: Path to the JSON tracking file.
+        orphan_hours: Hours an instance must be orphaned before destruction.
+        logger: Logger instance.
+        dry_run: If True, log what would happen but don't destroy.
+        already_torn_down: Set of instance names already torn down in this
+                           cycle (to avoid double-destroying).
+
+    Returns:
+        Set of instance names that were destroyed (or would be in dry-run).
+    """
+    now = datetime.now(timezone.utc)
+    orphan_data = _load_orphan_instances(orphan_file)
+    orphan_data_dirty = False
+    destroyed_names: set = set()
+
+    if already_torn_down is None:
+        already_torn_down = set()
+
+    # Build set of currently running instance IDs
+    running_instance_ids = {
+        inst.id for inst in instances
+        if inst.status == 'running' and inst.name not in already_torn_down
+    }
+
+    # Remove entries for instances no longer running
+    stale_keys = [
+        iid for iid in orphan_data if iid not in running_instance_ids
+    ]
+    for iid in stale_keys:
+        logger.debug(
+            f"Removing orphan tracker entry for instance {iid} "
+            f"(no longer running)"
+        )
+        del orphan_data[iid]
+        orphan_data_dirty = True
+
+    # Check each running instance
+    instances_to_destroy = []
+
+    for inst in instances:
+        if inst.status != 'running':
+            continue
+        if inst.name in already_torn_down:
+            continue
+
+        if _is_instance_orphaned(inst, worker_job_map, logger):
+            # Instance is orphaned
+            if inst.id not in orphan_data:
+                # First time seeing this instance as orphaned
+                orphan_data[inst.id] = now.isoformat()
+                orphan_data_dirty = True
+                logger.info(
+                    f"Instance {inst.name} ({inst.id}) appears orphaned "
+                    f"— starting {orphan_hours}h grace timer"
+                )
+            else:
+                # Already tracked — check if grace period expired
+                first_seen_str = orphan_data[inst.id]
+                try:
+                    first_seen = datetime.fromisoformat(first_seen_str)
+                    if first_seen.tzinfo is None:
+                        first_seen = first_seen.replace(tzinfo=timezone.utc)
+                    hours_orphaned = (now - first_seen).total_seconds() / 3600
+                except (ValueError, TypeError):
+                    orphan_data[inst.id] = now.isoformat()
+                    orphan_data_dirty = True
+                    hours_orphaned = 0
+
+                if hours_orphaned >= orphan_hours:
+                    instances_to_destroy.append((inst, hours_orphaned))
+        else:
+            # Instance is NOT orphaned — remove from tracker if present
+            if inst.id in orphan_data:
+                logger.debug(
+                    f"Instance {inst.name} ({inst.id}) has active job "
+                    f"— removing from orphan tracker"
+                )
+                del orphan_data[inst.id]
+                orphan_data_dirty = True
+
+    # Destroy orphaned instances past the grace period
+    for inst, hours_orphaned in instances_to_destroy:
+        if dry_run:
+            logger.info(
+                f"[DRY RUN] Would destroy orphan instance {inst.name} "
+                f"({inst.id}) — orphaned for {hours_orphaned:.1f}h "
+                f"(threshold: {orphan_hours}h)"
+            )
+        else:
+            logger.info(
+                f"Destroying orphan instance {inst.name} ({inst.id}) "
+                f"— orphaned for {hours_orphaned:.1f}h"
+            )
+            provider.destroy_instance(inst.id)
+
+        destroyed_names.add(inst.name)
+        # Remove from tracker
+        orphan_data.pop(inst.id, None)
+        orphan_data_dirty = True
+
+    # Save updated tracking data
+    if orphan_data_dirty:
+        _save_orphan_instances(orphan_file, orphan_data)
+
+    return destroyed_names
+
+
+# ---------------------------------------------------------------------------
 # Stale project tracking
 # ---------------------------------------------------------------------------
 
@@ -496,6 +841,8 @@ class Monitor:
         project_unshare_hours: Optional[float] = None,
         stale_projects_file: Optional[str] = None,
         claim_timeout_hours: Optional[float] = None,
+        orphan_instance_hours: Optional[float] = None,
+        orphan_instances_file: Optional[str] = None,
         verbose: bool = False,
     ):
         """
@@ -531,6 +878,13 @@ class Monitor:
                                  (default: from .env or 24). Stale-claimed jobs are
                                  counted as needing workers and will be re-claimed by
                                  the next available worker.
+            orphan_instance_hours: Hours a running instance must have no active job
+                                   before being destroyed (default: from .env or 2).
+                                   Uses a two-pass approach: first pass records the
+                                   instance as orphaned, second pass (after the grace
+                                   period) destroys it. Set to 0 to disable.
+            orphan_instances_file: Path to the JSON file tracking orphan instances
+                                   (default: from .env or orphan_instances.json).
             verbose: Enable verbose GitLab scanning output.
         """
         # Load .env file (does not override existing env vars)
@@ -559,6 +913,13 @@ class Monitor:
             claim_timeout_hours if claim_timeout_hours is not None
             else float(os.environ.get('CLAIM_TIMEOUT_HOURS', str(DEFAULT_CLAIM_TIMEOUT_HOURS)))
         )
+        orphan_instance_hours = (
+            orphan_instance_hours if orphan_instance_hours is not None
+            else float(os.environ.get('ORPHAN_INSTANCE_HOURS', str(DEFAULT_ORPHAN_INSTANCE_HOURS)))
+        )
+        orphan_instances_file = orphan_instances_file or os.environ.get(
+            'ORPHAN_INSTANCES_FILE', DEFAULT_ORPHAN_INSTANCES_FILE
+        )
 
         # Setup logging
         logger = setup_logging(log_file)
@@ -570,7 +931,8 @@ class Monitor:
                      f"jobs_per_worker={jobs_per_worker}, idle_minutes={idle_minutes}, "
                      f"init_timeout={init_timeout}s, worker_yaml={worker_yaml}, "
                      f"project_unshare_hours={project_unshare_hours}h, "
-                     f"claim_timeout_hours={claim_timeout_hours}h")
+                     f"claim_timeout_hours={claim_timeout_hours}h, "
+                     f"orphan_instance_hours={orphan_instance_hours}h")
 
         # --- Preflight checks ---
 
@@ -717,6 +1079,32 @@ class Monitor:
                         logger.info(f"[DRY RUN] Would tear down stale init instance: {inst.name}")
                     torn_down_names.add(inst.name)
 
+        # --- Step 4b: Clean up orphan instances ---
+
+        orphan_destroyed: set = set()
+        if orphan_instance_hours > 0:
+            # Build worker→job map from the already-scanned project data
+            worker_job_map = _build_worker_job_map(
+                all_projects, claim_timeout_hours
+            )
+
+            orphan_file_path = str(Path(__file__).parent / orphan_instances_file)
+            orphan_destroyed = cleanup_orphan_instances(
+                instances=instances,
+                worker_job_map=worker_job_map,
+                provider=provider,
+                orphan_file=orphan_file_path,
+                orphan_hours=orphan_instance_hours,
+                logger=logger,
+                dry_run=dry_run,
+                already_torn_down=torn_down_names,
+            )
+            torn_down_names.update(orphan_destroyed)
+            if orphan_destroyed:
+                logger.info(f"Destroyed {len(orphan_destroyed)} orphan instance(s)")
+        else:
+            logger.debug("Orphan instance cleanup disabled (orphan_instance_hours=0)")
+
         # --- Step 5: Count healthy running workers ---
 
         healthy_statuses = {'running', 'init'}
@@ -768,6 +1156,7 @@ class Monitor:
             f"active_jobs={active_jobs} desired={desired_workers} "
             f"current={current_workers} launched={workers_to_launch} "
             f"cleaned_up={len(torn_down_names)} "
+            f"orphans_destroyed={len(orphan_destroyed)} "
             f"projects_scanned={len(all_projects)}"
         )
 
