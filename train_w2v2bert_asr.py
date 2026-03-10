@@ -407,12 +407,12 @@ def train_w2v2bert_asr_api(
     lowercase: bool = True,
     remove_punctuation: bool = True,
     remove_numbers: bool = False,
-    learning_rate: float = 3e-4,
+    learning_rate: Optional[float] = None,
     per_device_train_batch_size: int = 8,
     per_device_eval_batch_size: int = 8,
     gradient_accumulation_steps: int = 2,
     num_train_epochs: int = 5,
-    warmup_steps: int = 500,
+    warmup_steps: Optional[int] = None,
     save_steps: int = 500,
     eval_steps: int = 500,
     eval_strategy: str = "epoch",
@@ -448,12 +448,16 @@ def train_w2v2bert_asr_api(
         lowercase: Whether to lowercase text
         remove_punctuation: Whether to remove punctuation
         remove_numbers: Whether to remove numbers
-        learning_rate: Learning rate for training
+        learning_rate: Learning rate for training. If None, a model-aware
+                      default is used: 3e-5 for W2V2-BERT (large pretrained
+                      model needs lower LR to avoid catastrophic forgetting),
+                      3e-4 for traditional Wav2Vec2.
         per_device_train_batch_size: Batch size per device for training
         per_device_eval_batch_size: Batch size per device for evaluation
         gradient_accumulation_steps: Number of gradient accumulation steps
         num_train_epochs: Number of training epochs
-        warmup_steps: Number of warmup steps
+        warmup_steps: Number of warmup steps. If None, a model-aware default
+                     is used: 2000 for W2V2-BERT, 500 for traditional Wav2Vec2.
         save_steps: Save checkpoint every N steps
         eval_steps: Evaluate every N steps (only used when eval_strategy="steps")
         eval_strategy: When to run evaluation - "epoch" (every epoch, default) or
@@ -508,6 +512,16 @@ def train_w2v2bert_asr_api(
 
         model_type = "Wav2Vec2" if use_wav2vec2_base else "Wav2Vec2-BERT"
         logger.info("Using %s architecture with model: %s", model_type, model_name)
+
+        # Apply model-aware defaults for parameters left as None.
+        # W2V2-BERT (~600M params) needs a lower learning rate to preserve
+        # pretrained representations and longer warmup to avoid instability.
+        if learning_rate is None:
+            learning_rate = 3e-4 if use_wav2vec2_base else 3e-5
+            logger.info("Using model-aware default learning rate: %s", learning_rate)
+        if warmup_steps is None:
+            warmup_steps = 500 if use_wav2vec2_base else 2000
+            logger.info("Using model-aware default warmup steps: %s", warmup_steps)
 
         # Set seed
         torch.manual_seed(seed)
@@ -596,15 +610,12 @@ def train_w2v2bert_asr_api(
                 ignore_mismatched_sizes=True,
             )
 
-        # Freeze feature encoder
-        if use_wav2vec2_base:
-            for param in model.wav2vec2.feature_extractor.parameters():
-                param.requires_grad = False
-            logger.info("Froze Wav2Vec2 feature extractor parameters")
-        else:
-            for param in model.wav2vec2_bert.feature_projection.parameters():
-                param.requires_grad = False
-            logger.info("Froze Wav2Vec2-BERT feature projection parameters")
+        # Freeze feature encoder (convolutional front-end).
+        # This is the standard approach per the HuggingFace fine-tuning guide:
+        # the feature encoder extracts low-level acoustic features and should
+        # remain fixed while the transformer encoder layers are fine-tuned.
+        model.freeze_feature_encoder()
+        logger.info("Froze %s feature encoder", model_type)
 
         # Enable gradient checkpointing to reduce activation memory usage
         # This trades ~30% slower training for ~60% less activation memory
@@ -642,7 +653,7 @@ def train_w2v2bert_asr_api(
             # Move prediction logits to CPU every N eval steps to prevent OOM
             # during evaluation. Without this, the Trainer accumulates all logits
             # on GPU which can exceed VRAM for large vocabularies/datasets.
-            eval_accumulation_steps=1,
+            eval_accumulation_steps=10,
             logging_steps=logging_steps,
             learning_rate=learning_rate,
             num_train_epochs=num_train_epochs,
@@ -808,12 +819,14 @@ def main():
     parser.add_argument("--remove_numbers", action="store_true", default=False)
 
     # Training arguments
-    parser.add_argument("--learning_rate", type=float, default=3e-4)
+    parser.add_argument("--learning_rate", type=float, default=None,
+                       help="Learning rate (default: model-aware, 3e-5 for W2V2-BERT, 3e-4 for Wav2Vec2)")
     parser.add_argument("--per_device_train_batch_size", type=int, default=8)
     parser.add_argument("--per_device_eval_batch_size", type=int, default=8)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=2)
     parser.add_argument("--num_train_epochs", type=int, default=5)
-    parser.add_argument("--warmup_steps", type=int, default=500)
+    parser.add_argument("--warmup_steps", type=int, default=None,
+                       help="Warmup steps (default: model-aware, 2000 for W2V2-BERT, 500 for Wav2Vec2)")
     parser.add_argument("--save_steps", type=int, default=500)
     parser.add_argument("--eval_steps", type=int, default=500)
     parser.add_argument("--eval_strategy", type=str, default="epoch",
@@ -848,6 +861,14 @@ def main():
 
     model_type = "Wav2Vec2" if args.use_wav2vec2_base else "Wav2Vec2-BERT"
     logger.info("Using %s architecture with model: %s", model_type, args.model_name)
+
+    # Apply model-aware defaults for parameters left as None
+    if args.learning_rate is None:
+        args.learning_rate = 3e-4 if args.use_wav2vec2_base else 3e-5
+        logger.info("Using model-aware default learning rate: %s", args.learning_rate)
+    if args.warmup_steps is None:
+        args.warmup_steps = 500 if args.use_wav2vec2_base else 2000
+        logger.info("Using model-aware default warmup steps: %s", args.warmup_steps)
 
     # Set seed
     torch.manual_seed(args.seed)
@@ -937,17 +958,10 @@ def main():
             ignore_mismatched_sizes=True,
         )
 
-    # Freeze feature encoder
-    if args.use_wav2vec2_base:
-        # Traditional Wav2Vec2 uses feature_extractor
-        for param in model.wav2vec2.feature_extractor.parameters():
-            param.requires_grad = False
-        logger.info("Froze Wav2Vec2 feature extractor parameters")
-    else:
-        # Wav2Vec2-BERT uses feature_projection
-        for param in model.wav2vec2_bert.feature_projection.parameters():
-            param.requires_grad = False
-        logger.info("Froze Wav2Vec2-BERT feature projection parameters")
+    # Freeze feature encoder (convolutional front-end).
+    # This is the standard approach per the HuggingFace fine-tuning guide.
+    model.freeze_feature_encoder()
+    logger.info("Froze %s feature encoder", model_type)
 
     # Enable gradient checkpointing to reduce activation memory usage
     # This trades ~30% slower training for ~60% less activation memory
@@ -981,7 +995,7 @@ def main():
         # Move prediction logits to CPU every N eval steps to prevent OOM
         # during evaluation. Without this, the Trainer accumulates all logits
         # on GPU which can exceed VRAM for large vocabularies/datasets.
-        eval_accumulation_steps=1,
+        eval_accumulation_steps=10,
         logging_steps=args.logging_steps,
         learning_rate=args.learning_rate,
         num_train_epochs=args.num_train_epochs,

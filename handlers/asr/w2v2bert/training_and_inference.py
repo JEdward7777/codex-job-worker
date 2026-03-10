@@ -90,26 +90,34 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         if use_wav2vec2_base is None:
             use_wav2vec2_base = 'bert' not in base_model.lower()
 
-        # Set memory-aware defaults based on model size.
-        # W2V2-BERT 2.0 (~600M params) needs smaller batch size and memory
-        # optimizations to fit on a 24GB GPU. The smaller wav2vec2-base
-        # (~95M params) can use larger batches comfortably.
+        # Set memory-aware and convergence-aware defaults based on model size.
+        # W2V2-BERT 2.0 (~600M params) needs smaller batch size, memory
+        # optimizations, lower learning rate, and longer warmup to fit on a
+        # 24GB GPU and preserve pretrained representations.
+        # The smaller wav2vec2-base (~95M params) can use larger batches and
+        # higher learning rates comfortably.
         if use_wav2vec2_base:
             default_batch_size = 8
             default_gradient_accumulation = 2
             default_use_8bit_optimizer = False
+            default_learning_rate = 3e-4
+            default_warmup_steps = 500
+            default_epochs = 5
         else:
             default_batch_size = 2
             default_gradient_accumulation = 8
             default_use_8bit_optimizer = True
+            default_learning_rate = 3e-5   # Lower LR preserves pretrained weights
+            default_warmup_steps = 2000    # Longer warmup avoids gradient instability
+            default_epochs = 50            # Fewer epochs needed with proper LR
 
         # Get training parameters with defaults
         # 'epochs' is a top-level manifest field per the spec.
-        num_epochs = job_context.get('epochs', 5)
+        num_epochs = job_context.get('epochs', default_epochs)
         batch_size = job_context.get('batch_size', default_batch_size)
-        learning_rate = job_context.get('learning_rate', 3e-4)
+        learning_rate = job_context.get('learning_rate', default_learning_rate)
         gradient_accumulation_steps = job_context.get('gradient_accumulation_steps', default_gradient_accumulation)
-        warmup_steps = job_context.get('warmup_steps', 500)
+        warmup_steps = job_context.get('warmup_steps', default_warmup_steps)
         save_steps = job_context.get('save_steps', 500)
         eval_steps = job_context.get('eval_steps', 500)
         eval_strategy = job_context.get('eval_strategy', 'epoch')
@@ -140,12 +148,19 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         suppress_unk = inference_config.get('suppress_unk', True)
         unk_replacement = inference_config.get('unk_replacement', '')
 
+        # Eval batch size can be larger than train batch size since evaluation
+        # doesn't store gradients/activations for backprop.
+        eval_batch_size = max(batch_size, 8)
+
         model_arch = "Wav2Vec2" if use_wav2vec2_base else "Wav2Vec2-BERT"
         print("\nConfiguration:")
         print(f"  Model architecture: {model_arch}")
         print(f"  Base model: {base_model}")
         print(f"  Training epochs: {num_epochs}")
-        print(f"  Batch size: {batch_size}")
+        print(f"  Batch size (train): {batch_size}")
+        print(f"  Batch size (eval): {eval_batch_size}")
+        print(f"  Learning rate: {learning_rate}")
+        print(f"  Warmup steps: {warmup_steps}")
         print(f"  SentenceTransmorgrifier training: {'Enabled' if train_transmorgrifier else 'Disabled'}")
         print()
 
@@ -301,7 +316,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             remove_numbers=remove_numbers,
             learning_rate=learning_rate,
             per_device_train_batch_size=batch_size,
-            per_device_eval_batch_size=batch_size,
+            per_device_eval_batch_size=eval_batch_size,
             gradient_accumulation_steps=gradient_accumulation_steps,
             num_train_epochs=num_epochs,
             warmup_steps=warmup_steps,
