@@ -38,7 +38,6 @@ Usage:
 Cron example (every 10 minutes):
     */10 * * * * flock -n /tmp/monitor.lock -c 'cd /path/to/launcher_project && bash run_monitor_cron.sh' >> /var/log/monitor_cron.log 2>&1
 """
-
 import gzip
 import json
 import logging
@@ -357,6 +356,45 @@ def _build_worker_job_map(
     return worker_jobs
 
 
+def _find_job_for_instance(
+    instance: 'InstanceInfo',
+    worker_job_map: Dict[str, Dict],
+) -> Optional[Dict]:
+    """
+    Find the active job associated with a cloud instance.
+
+    Instead of extracting a cluster name from the instance label (which
+    is cloud-specific and brittle), we check whether any worker_id in the
+    job map is a substring of the instance name.  This works because:
+
+    - On Vast.ai the label is "{worker_id}-{host_id}-head"
+      (e.g., "codex-worker-006479f5-413d3bc4-head" contains "codex-worker-006479f5")
+    - On pure SkyPilot the name IS the worker_id directly
+    - On any future provider, as long as the instance name *contains*
+      the worker_id, the match will succeed.
+
+    If multiple worker_ids match (unlikely but possible), the longest
+    match wins — this avoids a short prefix accidentally matching a
+    longer, unrelated name.
+
+    Args:
+        instance: The running InstanceInfo to check.
+        worker_job_map: Mapping from worker_id → augmented job dict.
+
+    Returns:
+        The matching job dict, or None if no match found.
+    """
+    best_match: Optional[Dict] = None
+    best_len = 0
+
+    for worker_id, job in worker_job_map.items():
+        if worker_id in instance.name and len(worker_id) > best_len:
+            best_match = job
+            best_len = len(worker_id)
+
+    return best_match
+
+
 def _is_instance_orphaned(
     instance: 'InstanceInfo',
     worker_job_map: Dict[str, Dict],
@@ -380,30 +418,17 @@ def _is_instance_orphaned(
     Returns:
         True if the instance should be tracked as potentially orphaned.
     """
-    # Extract the SkyPilot cluster name from the instance name/label.
-    #
-    # For Vast.ai instances, the label is "{cluster}-{host_id}-head"
-    # (e.g., "codex-worker-006479f5-413d3bc4-head") and we need to
-    # extract the cluster name ("codex-worker-006479f5") which matches
-    # the worker_id passed to the worker process.
-    #
-    # For pure SkyPilot instances, the name IS the cluster name directly.
-    #
-    # We try the Vast.ai pattern first; if it doesn't match, fall back
-    # to using the raw name.
-    import re
-    _label_re = re.compile(r'^(.+)-[0-9a-f]{8}-head$')
-    m = _label_re.match(instance.name)
-    cluster_name = m.group(1) if m else instance.name
-
-    # Look up the job for this worker
-    job = worker_job_map.get(cluster_name)
+    # Find the job for this instance by checking if any worker_id is
+    # contained in the instance name.  This is cloud-agnostic — works
+    # for Vast.ai labels, SkyPilot names, or any provider whose instance
+    # names incorporate the worker_id.
+    job = _find_job_for_instance(instance, worker_job_map)
 
     if job is None:
         # Tier 3: No active job at all — instance is idle/orphaned
         logger.debug(
             f"Instance {instance.name} ({instance.id}): no active job "
-            f"for worker_id={cluster_name} — orphaned"
+            f"found (no worker_id matches instance name) — orphaned"
         )
         return True
 
@@ -566,6 +591,12 @@ def cleanup_orphan_instances(
 
                 if hours_orphaned >= orphan_hours:
                     instances_to_destroy.append((inst, hours_orphaned))
+                else:
+                    logger.info(
+                        f"Instance {inst.name} ({inst.id}) appears orphaned "
+                        f"— {hours_orphaned:.1f}h orphaned so far "
+                        f"(threshold: {orphan_hours}h)"
+                    )
         else:
             # Instance is NOT orphaned — remove from tracker if present
             if inst.id in orphan_data:
