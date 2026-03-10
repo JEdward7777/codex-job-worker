@@ -68,6 +68,24 @@ setup: |
   cd "$INSTALL_DIR"
   bash setup_worker.sh
 
+  # --- Vast.ai container restart self-destruct ---
+  # If Vast.ai restarts our container, all worker state is corrupted
+  # (in-flight downloads truncated, skylet dead, SkyPilot state stale).
+  # Rather than trying to recover, we stop the instance immediately.
+  # The monitor will detect the stopped instance and launch a fresh one.
+  #
+  # /root/onstart.sh is executed by Vast.ai on every container start.
+  # On first boot this file doesn't exist yet (we're creating it now),
+  # so it only fires on subsequent restarts.
+  # See: https://docs.vast.ai/documentation/reference/faq/instances
+  cat > /root/onstart.sh << 'ONSTART_EOF'
+  #!/bin/bash
+  echo "$(date -u) Container restart detected — stopping instance" >> /var/log/onstart.log
+  pip install vastai >> /var/log/onstart.log 2>&1
+  vastai stop instance $CONTAINER_ID >> /var/log/onstart.log 2>&1
+  ONSTART_EOF
+  chmod +x /root/onstart.sh
+
 # Run executes the force-job task
 # After the job finishes (success or failure), the VM stays running so you
 # can SSH in and re-run the command manually for iterative debugging.

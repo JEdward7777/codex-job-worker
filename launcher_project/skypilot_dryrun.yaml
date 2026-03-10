@@ -60,6 +60,20 @@ setup: |
   echo "Setup complete!"
   echo "=========================================="
 
+  # --- Vast.ai container restart self-destruct ---
+  # If Vast.ai restarts our container, all worker state is corrupted.
+  # Stop the instance immediately; the monitor will launch a fresh one.
+  # /root/onstart.sh doesn't exist on first boot (we're creating it now),
+  # so it only fires on subsequent restarts.
+  # See: https://docs.vast.ai/documentation/reference/faq/instances
+  cat > /root/onstart.sh << 'ONSTART_EOF'
+  #!/bin/bash
+  echo "$(date -u) Container restart detected — stopping instance" >> /var/log/onstart.log
+  pip install vastai >> /var/log/onstart.log 2>&1
+  vastai stop instance $CONTAINER_ID >> /var/log/onstart.log 2>&1
+  ONSTART_EOF
+  chmod +x /root/onstart.sh
+
 run: |
   set -e
   export PATH="$HOME/.local/bin:$PATH"
