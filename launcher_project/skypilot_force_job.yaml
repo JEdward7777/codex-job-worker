@@ -82,7 +82,7 @@ run: |
     cat >> /root/onstart.sh << 'ONSTART_EOF'
 
   # codex-worker: self-destruct on container restart
-  echo "$(date -u) Container restart detected — stopping instance" >> /var/log/onstart.log
+  echo "$(date -u) Container restart detected — destroying instance" >> /var/log/onstart.log
   pip install vastai >> /var/log/onstart.log 2>&1
   vastai destroy instance $CONTAINER_ID >> /var/log/onstart.log 2>&1  # codex_onstart
   ONSTART_EOF
