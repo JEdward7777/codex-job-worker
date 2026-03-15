@@ -614,8 +614,22 @@ def train_w2v2bert_asr_api(
         # This is the standard approach per the HuggingFace fine-tuning guide:
         # the feature encoder extracts low-level acoustic features and should
         # remain fixed while the transformer encoder layers are fine-tuned.
-        model.freeze_feature_encoder()
-        logger.info("Froze %s feature encoder", model_type)
+        # Wav2Vec2ForCTC has freeze_feature_encoder(); Wav2Vec2BertForCTC does not,
+        # so we fall back to manually freezing the feature_projection parameters.
+        if hasattr(model, "freeze_feature_encoder"):
+            model.freeze_feature_encoder()
+            logger.info("Froze %s feature encoder via freeze_feature_encoder()", model_type)
+        else:
+            # Wav2Vec2BertForCTC: freeze the feature_projection layer on the
+            # inner wav2vec2_bert model.  This is the equivalent of what
+            # freeze_feature_encoder() does for the traditional Wav2Vec2 models.
+            inner = getattr(model, "wav2vec2_bert", None)
+            if inner is not None and hasattr(inner, "feature_projection"):
+                for param in inner.feature_projection.parameters():
+                    param.requires_grad = False
+                logger.info("Froze %s feature_projection parameters", model_type)
+            else:
+                logger.warning("Could not find feature encoder to freeze on %s model", model_type)
 
         # Enable gradient checkpointing to reduce activation memory usage
         # This trades ~30% slower training for ~60% less activation memory
@@ -960,8 +974,19 @@ def main():
 
     # Freeze feature encoder (convolutional front-end).
     # This is the standard approach per the HuggingFace fine-tuning guide.
-    model.freeze_feature_encoder()
-    logger.info("Froze %s feature encoder", model_type)
+    # Wav2Vec2ForCTC has freeze_feature_encoder(); Wav2Vec2BertForCTC does not,
+    # so we fall back to manually freezing the feature_projection parameters.
+    if hasattr(model, "freeze_feature_encoder"):
+        model.freeze_feature_encoder()
+        logger.info("Froze %s feature encoder via freeze_feature_encoder()", model_type)
+    else:
+        inner = getattr(model, "wav2vec2_bert", None)
+        if inner is not None and hasattr(inner, "feature_projection"):
+            for param in inner.feature_projection.parameters():
+                param.requires_grad = False
+            logger.info("Froze %s feature_projection parameters", model_type)
+        else:
+            logger.warning("Could not find feature encoder to freeze on %s model", model_type)
 
     # Enable gradient checkpointing to reduce activation memory usage
     # This trades ~30% slower training for ~60% less activation memory
