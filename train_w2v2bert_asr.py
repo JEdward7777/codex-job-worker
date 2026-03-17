@@ -355,18 +355,19 @@ def compute_metrics(pred, wer_metric, cer_metric, processor):
 
 
 class BestCheckpointCallback(TrainerCallback):
-    """Callback to save best checkpoint separately."""
+    """Callback to log when a new best checkpoint is found."""
 
     def __init__(self, output_dir: str):
         self.output_dir = output_dir
-        self.best_wer = float("inf")
+        self.best_cer = float("inf")
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
-        if metrics and "eval_wer" in metrics:
-            wer = metrics["eval_wer"]
-            if wer < self.best_wer:
-                self.best_wer = wer
-                logger.info("New best WER: %.4f", wer)
+        if metrics and "eval_cer" in metrics:
+            cer = metrics["eval_cer"]
+            if cer < self.best_cer:
+                self.best_cer = cer
+                logger.info("New best CER: %.4f (epoch %.1f)",
+                            cer, state.epoch if state.epoch else 0)
 
 
 class HeartbeatCallback(TrainerCallback):
@@ -677,7 +678,7 @@ def train_w2v2bert_asr_api(
             optim="adamw_bnb_8bit" if use_8bit_optimizer else "adamw_torch",
             save_total_limit=save_total_limit,
             load_best_model_at_end=True,
-            metric_for_best_model="wer",
+            metric_for_best_model="cer",
             greater_is_better=False,
             report_to=["tensorboard"],
             logging_dir=os.path.join(output_dir, "logs"),
@@ -736,6 +737,11 @@ def train_w2v2bert_asr_api(
 
         result["epochs_completed"] = num_train_epochs
         result["final_model_path"] = final_model_path
+
+        # Record which checkpoint was selected as best.
+        # The Trainer tracks this when load_best_model_at_end=True.
+        result["best_model_checkpoint"] = getattr(trainer.state, "best_model_checkpoint", None)
+        result["best_metric"] = getattr(trainer.state, "best_metric", None)
 
         # Include training metrics from HuggingFace Trainer
         result["train_metrics"] = {
@@ -1032,7 +1038,7 @@ def main():
         push_to_hub=args.push_to_hub,
         hub_model_id=args.hub_model_id,
         load_best_model_at_end=True,
-        metric_for_best_model="wer",
+        metric_for_best_model="cer",
         greater_is_better=False,
         report_to=["tensorboard"],
         logging_dir=os.path.join(args.output_dir, "logs"),

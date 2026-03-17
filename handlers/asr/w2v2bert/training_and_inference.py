@@ -337,6 +337,15 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         print(f"\n  Training completed: {train_result['epochs_completed']} epochs")
         print(f"  Final model: {train_result['final_model_path']}")
 
+        # Log which checkpoint was selected as best (Trainer uses load_best_model_at_end
+        # with metric_for_best_model="cer", so the model with the lowest CER is loaded)
+        best_ckpt = train_result.get('best_model_checkpoint')
+        best_metric = train_result.get('best_metric')
+        if best_ckpt:
+            print(f"  Best checkpoint: {best_ckpt} (CER={best_metric})")
+        else:
+            print(f"  Best checkpoint: N/A (best_metric={best_metric})")
+
         # Write training metrics CSV
         metrics_csv_path = None
         log_history = train_result.get('log_history')
