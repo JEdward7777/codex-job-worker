@@ -83,33 +83,24 @@ def should_use_lfs(file_path: Union[str, Path]) -> bool:
     return ext not in {'.txt', '.json', '.yaml', '.yml', '.xml', '.html', '.css', '.js'}
 
 
-def create_tar_archive(source_dir: Union[str, Path], output_path: Optional[Union[str, Path]] = None) -> bytes:
+def create_tar_archive(source_dir: Union[str, Path], output_path: Union[str, Path]) -> None:
     """
-    Create a tar archive from a directory.
+    Create a gzip-compressed tar archive from a directory.
+
+    The archive is written **directly to disk** in a streaming fashion so that
+    multi-GB model directories never need to be buffered entirely in memory.
 
     Args:
         source_dir: Directory to archive
-        output_path: Optional path to write the archive to. If None, returns bytes.
-
-    Returns:
-        Archive content as bytes (if output_path is None)
+        output_path: Path to write the archive to.
     """
     source_dir = Path(source_dir)
 
-    buffer = BytesIO()
-    with tarfile.open(fileobj=buffer, mode='w:gz') as tar:
-        for file_path in source_dir.rglob('*'):
+    with tarfile.open(output_path, mode='w:gz') as tar:
+        for file_path in sorted(source_dir.rglob('*')):
             if file_path.is_file():
                 arcname = file_path.relative_to(source_dir)
                 tar.add(file_path, arcname=arcname)
-
-    content = buffer.getvalue()
-
-    if output_path:
-        with open(output_path, 'wb') as f:
-            f.write(content)
-
-    return content
 
 
 def extract_tar_archive(archive_path: Union[str, Path, bytes], output_dir: Union[str, Path]) -> Path:

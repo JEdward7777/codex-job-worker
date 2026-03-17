@@ -575,7 +575,13 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         if upload_result['success']:
             print(f"    Uploaded model to: {upload_result['remote_path']}")
         else:
-            print(f"    Warning: Failed to upload model: {upload_result['error_message']}")
+            error_details = upload_result.get('error_message', 'Unknown error')
+            print(f"    Warning: Failed to upload model: {error_details}")
+            files_failed = upload_result.get('files_failed', [])
+            if files_failed:
+                print(f"\n    Upload failure details ({len(files_failed)} file(s) failed):")
+                for ff in files_failed:
+                    print(f"      - {ff.get('remote_path', '?')}: {ff.get('error', '?')}")
 
         print("\n" + "=" * 60)
         print("Training and Inference completed successfully!")
@@ -768,16 +774,32 @@ def _upload_model(
 
     The model directory may contain a transmorgrifier.tm file which will be
     included in the archive automatically.
+
+    Returns:
+        Dictionary with success, remote_path, error_message, files_failed
     """
     try:
         model_dir = Path(model_path)
 
-        # Create tar archive of the model directory
+        # Create tar archive of the model directory (streams directly to disk)
         archive_filename = "asr_model.pth.tar"
         archive_path = model_dir.parent / archive_filename
 
         print(f"    Creating model archive: {archive_filename}")
         create_tar_archive(model_dir, archive_path)
+
+        # Log archive size so we know what we're trying to upload
+        if archive_path.exists():
+            archive_size = archive_path.stat().st_size
+            archive_mb = archive_size / (1024 * 1024)
+            print(f"    Archive size: {archive_mb:.1f} MB ({archive_size:,} bytes)")
+        else:
+            return {
+                'success': False,
+                'remote_path': None,
+                'error_message': f"Archive creation failed: {archive_path} does not exist",
+                'files_failed': [],
+            }
 
         # Remote path for the archive
         remote_path = f"gpu_jobs/job_{job_id}/model/{archive_filename}"
@@ -807,6 +829,8 @@ def _upload_model(
             project_id=str(job_context['project_id']),
         )
 
+        print(f"    Uploading {len(files)} file(s) to GitLab...")
+
         # Upload all files in a single batch commit
         result = uploader.upload_batch(
             files=files,
@@ -821,18 +845,21 @@ def _upload_model(
             return {
                 'success': True,
                 'remote_path': remote_path,
-                'error_message': None
+                'error_message': None,
+                'files_failed': [],
             }
         else:
             return {
                 'success': False,
                 'remote_path': None,
-                'error_message': result.get('error_message', 'Upload failed')
+                'error_message': result.get('error_message', 'Upload failed'),
+                'files_failed': result.get('files_failed', []),
             }
 
     except Exception as e:
         return {
             'success': False,
             'remote_path': None,
-            'error_message': f"{type(e).__name__}: {str(e)}"
+            'error_message': f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}",
+            'files_failed': [],
         }

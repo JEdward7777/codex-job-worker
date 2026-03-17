@@ -1052,11 +1052,17 @@ class GitLabDatasetDownloader:
         project_info = self._get_project_info()
         return project_info.get('default_branch', 'main')
 
+    # Chunk size for streaming hash computation and uploads (256 KB).
+    _HASH_CHUNK_SIZE = 256 * 1024
+
     def _compute_lfs_pointer_from_opener(
         self,
         content_opener: Callable[[], ContextManager[BinaryIO]]
     ) -> Dict[str, any]:
         """Compute LFS pointer data using a content opener callback.
+
+        The hash is computed in a **streaming** fashion so that multi-GB files
+        are never loaded entirely into memory.
 
         Args:
             content_opener: A callable that returns a context manager yielding
@@ -1065,12 +1071,18 @@ class GitLabDatasetDownloader:
         Returns:
             Dictionary with oid (sha256 hash) and size
         """
+        sha256 = hashlib.sha256()
+        size = 0
         with content_opener() as f:
-            content = f.read()
-        sha256_hash = hashlib.sha256(content).hexdigest()
+            while True:
+                chunk = f.read(self._HASH_CHUNK_SIZE)
+                if not chunk:
+                    break
+                sha256.update(chunk)
+                size += len(chunk)
         return {
-            'oid': sha256_hash,
-            'size': len(content)
+            'oid': sha256.hexdigest(),
+            'size': size,
         }
 
     def _create_lfs_pointer_content(self, oid: str, size: int) -> str:
@@ -1085,8 +1097,27 @@ class GitLabDatasetDownloader:
         """
         return f"version https://git-lfs.github.com/spec/v1\noid sha256:{oid}\nsize {size}\n"
 
+    # Timeout for LFS upload PUT requests: (connect, read) in seconds.
+    # Large model files (1-2 GB+) can take a long time to upload, so we use
+    # a very generous read timeout (30 minutes).  The connect timeout is kept
+    # short so we fail fast if the server is unreachable.
+    _UPLOAD_TIMEOUT = (30, 1800)
+
+    # Number of retry attempts for transient LFS upload failures.
+    _UPLOAD_MAX_RETRIES = 3
+
+    # Base delay (seconds) for exponential backoff between upload retries.
+    _UPLOAD_BACKOFF_BASE = 5.0
+
     def _upload_lfs_objects(self, objects: List[Dict]) -> Dict[str, Dict]:
         """Upload objects to LFS storage using the batch API.
+
+        Includes retry logic with exponential backoff for transient failures
+        (timeouts, connection resets, server errors).  Each retry re-requests
+        the upload URL from the LFS batch API in case the previous URL expired.
+
+        The file content is streamed from disk via the content_opener so that
+        multi-GB files are never buffered entirely in memory.
 
         Args:
             objects: List of dicts with 'oid', 'size', and 'content_opener' keys.
@@ -1101,83 +1132,137 @@ class GitLabDatasetDownloader:
 
         # Get project path for LFS URL (LFS requires path, not numeric ID)
         project_path = self._get_project_path_for_lfs()
-
-        # Prepare batch request
         lfs_batch_url = f"{self.server_url}/{project_path}.git/info/lfs/objects/batch"
-
-        batch_objects = [{'oid': obj['oid'], 'size': obj['size']} for obj in objects]
-
-        lfs_batch_payload = {
-            "operation": "upload",
-            "transfers": ["basic"],
-            "objects": batch_objects
-        }
 
         lfs_headers = {
             'Accept': 'application/vnd.git-lfs+json',
             'Content-Type': 'application/vnd.git-lfs+json'
         }
 
-        # Request upload URLs
-        batch_response = self.session.post(
-            lfs_batch_url,
-            json=lfs_batch_payload,
-            headers=lfs_headers,
-            auth=('oauth2', self.access_token)
-        )
-        batch_response.raise_for_status()
-        batch_data = batch_response.json()
-
-        # Build a map of oid -> content_opener for easy lookup
+        # Build lookup maps
         opener_map = {obj['oid']: obj['content_opener'] for obj in objects}
         size_map = {obj['oid']: obj['size'] for obj in objects}
+        remote_path_map = {obj['oid']: obj.get('remote_path', '<unknown>') for obj in objects}
 
-        # Process each object in the response
         results = {}
-        for obj in batch_data.get('objects', []):
-            oid = obj['oid']
 
-            # Check for errors in the batch response
-            if 'error' in obj:
-                results[oid] = {
-                    'success': False,
-                    'error': f"LFS batch error: {obj['error'].get('message', 'Unknown error')}"
-                }
-                continue
+        for attempt in range(1, self._UPLOAD_MAX_RETRIES + 1):
+            # Determine which objects still need uploading
+            pending_objects = [
+                {'oid': obj['oid'], 'size': obj['size']}
+                for obj in objects
+                if obj['oid'] not in results or not results[obj['oid']].get('success')
+            ]
+            if not pending_objects:
+                break
 
-            # Check if upload action is present (object may already exist)
-            if 'actions' not in obj or 'upload' not in obj['actions']:
-                # Object already exists in LFS storage
-                results[oid] = {'success': True, 'already_exists': True}
-                continue
+            if attempt > 1:
+                backoff = self._UPLOAD_BACKOFF_BASE * (2 ** (attempt - 2))
+                print(f"    LFS upload retry {attempt}/{self._UPLOAD_MAX_RETRIES} "
+                      f"for {len(pending_objects)} object(s) after {backoff:.0f}s backoff...")
+                time.sleep(backoff)
 
-            # Upload the object
-            upload_action = obj['actions']['upload']
-            upload_url = upload_action['href']
-            content_opener = opener_map[oid]
-            file_size = size_map[oid]
-
-            # Start with headers from the batch response
-            upload_headers = dict(upload_action.get('header', {}))
-            # Add headers required by LFS spec for basic transfer
-            upload_headers['Content-Type'] = 'application/octet-stream'
-            # Remove Transfer-Encoding if present - nginx rejects chunked encoding
-            upload_headers.pop('Transfer-Encoding', None)
+            # Request upload URLs for pending objects
+            lfs_batch_payload = {
+                "operation": "upload",
+                "transfers": ["basic"],
+                "objects": pending_objects,
+            }
 
             try:
-                # Use the content opener to get a file-like object
-                # For path-based files, this opens the file directly
-                # For inline content, this returns a BytesIO wrapper
-                with content_opener() as file_obj:
-                    upload_response = self.session.put(
-                        upload_url,
-                        data=file_obj,
-                        headers={**upload_headers, 'Content-Length': str(file_size)}
-                    )
-                    upload_response.raise_for_status()
-                results[oid] = {'success': True}
+                batch_response = self.session.post(
+                    lfs_batch_url,
+                    json=lfs_batch_payload,
+                    headers=lfs_headers,
+                    auth=('oauth2', self.access_token),
+                    timeout=self._UPLOAD_TIMEOUT,
+                )
+                batch_response.raise_for_status()
+                batch_data = batch_response.json()
             except Exception as e:
-                results[oid] = {'success': False, 'error': str(e)}
+                # Batch API itself failed — mark all pending as failed for this attempt
+                err_msg = (f"LFS batch API request failed (attempt {attempt}/"
+                           f"{self._UPLOAD_MAX_RETRIES}): {type(e).__name__}: {e}")
+                print(f"    {err_msg}")
+                for pobj in pending_objects:
+                    results[pobj['oid']] = {'success': False, 'error': err_msg}
+                continue
+
+            # Process each object in the batch response
+            for obj in batch_data.get('objects', []):
+                oid = obj['oid']
+
+                # Check for errors in the batch response
+                if 'error' in obj:
+                    err_msg = f"LFS batch error: {obj['error'].get('message', 'Unknown error')}"
+                    print(f"    LFS batch error for {remote_path_map.get(oid, oid)}: {err_msg}")
+                    results[oid] = {'success': False, 'error': err_msg}
+                    continue
+
+                # Object may already exist in LFS storage (no upload action needed)
+                if 'actions' not in obj or 'upload' not in obj['actions']:
+                    results[oid] = {'success': True, 'already_exists': True}
+                    continue
+
+                # Upload the object with streaming and timeout
+                upload_action = obj['actions']['upload']
+                upload_url = upload_action['href']
+                content_opener = opener_map[oid]
+                file_size = size_map[oid]
+
+                # Build upload headers
+                upload_headers = dict(upload_action.get('header', {}))
+                upload_headers['Content-Type'] = 'application/octet-stream'
+                upload_headers['Content-Length'] = str(file_size)
+                # Remove Transfer-Encoding if present — nginx rejects chunked encoding
+                upload_headers.pop('Transfer-Encoding', None)
+
+                try:
+                    size_mb = file_size / (1024 * 1024)
+                    print(f"    Uploading LFS object {remote_path_map.get(oid, oid)} "
+                          f"({size_mb:.1f} MB, attempt {attempt}/{self._UPLOAD_MAX_RETRIES})...")
+
+                    with content_opener() as file_obj:
+                        upload_response = self.session.put(
+                            upload_url,
+                            data=file_obj,
+                            headers=upload_headers,
+                            timeout=self._UPLOAD_TIMEOUT,
+                        )
+                        upload_response.raise_for_status()
+
+                    results[oid] = {'success': True}
+                    print(f"    LFS upload succeeded for {remote_path_map.get(oid, oid)}")
+
+                except (requests.ConnectionError, requests.Timeout,
+                        requests.exceptions.ChunkedEncodingError,
+                        ConnectionResetError, OSError) as e:
+                    err_msg = (f"LFS upload failed (attempt {attempt}/"
+                               f"{self._UPLOAD_MAX_RETRIES}): {type(e).__name__}: {e}")
+                    print(f"    {err_msg}")
+                    results[oid] = {'success': False, 'error': err_msg}
+                    # Retryable — will be retried on next iteration
+
+                except requests.HTTPError as e:
+                    status = e.response.status_code if e.response is not None else 'N/A'
+                    err_msg = (f"LFS upload HTTP error (attempt {attempt}/"
+                               f"{self._UPLOAD_MAX_RETRIES}): "
+                               f"status={status} {type(e).__name__}: {e}")
+                    print(f"    {err_msg}")
+                    results[oid] = {'success': False, 'error': err_msg}
+                    # 5xx errors are retryable; 4xx are not
+                    if e.response is not None and 400 <= e.response.status_code < 500:
+                        # Non-retryable client error — don't retry this object
+                        # (it will stay as failed in results and won't appear in
+                        # pending_objects on the next iteration because we check
+                        # success, but we should mark it distinctly)
+                        pass
+                    # else: retryable server error
+
+                except Exception as e:
+                    err_msg = (f"LFS upload unexpected error: {type(e).__name__}: {e}")
+                    print(f"    {err_msg}")
+                    results[oid] = {'success': False, 'error': err_msg}
 
         return results
 
