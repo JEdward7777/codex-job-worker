@@ -770,14 +770,17 @@ def _upload_checkpoint(
             project_id=str(job_context['project_id']),
         )
 
-        # Upload checkpoint using LFS
+        # Upload checkpoint using LFS.
+        # Pass a heartbeat callback so the monitor knows we're alive during
+        # long LFS upload retries (model checkpoints can take a while).
         result = uploader.upload_batch(
             files=[{
                 'local_path': checkpoint_path,
                 'remote_path': remote_path,
                 'lfs': True,  # Model checkpoints always use LFS
             }],
-            commit_message=f"Upload checkpoint for job {job_id}"
+            commit_message=f"Upload checkpoint for job {job_id}",
+            heartbeat_callback=lambda msg: callbacks.heartbeat(message=msg, stage="upload"),
         )
 
         if result['success']:
@@ -1027,7 +1030,8 @@ def _upload_audio_and_update_codex(
         callbacks.heartbeat(message=f"Uploading {len(files_to_upload)} files", stage="upload")
         result = uploader.upload_batch(
             files=files_to_upload,
-            commit_message=f"TTS inference results for job {job_id}"
+            commit_message=f"TTS inference results for job {job_id}",
+            heartbeat_callback=lambda msg: callbacks.heartbeat(message=msg, stage="upload"),
         )
 
         # Count audio files uploaded

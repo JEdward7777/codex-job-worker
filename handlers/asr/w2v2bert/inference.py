@@ -28,6 +28,7 @@ from handlers.base import (
     get_cell_reference,
     get_cell_id,
     extract_tar_archive,
+    inject_cell_value,
 )
 from gitlab_to_hf_dataset import GitLabDatasetDownloader
 
@@ -139,6 +140,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
         )
 
         model_arch = "Wav2Vec2" if detected_wav2vec2_base else "Wav2Vec2-BERT"
+        edit_author = f"ASR {os.path.basename(model_path)}"
         print(f"  Loaded {model_arch} model on {device}")
 
         # Step 3: Auto-detect SentenceTransmorgrifier from model archive
@@ -295,13 +297,13 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                     except Exception as e:
                         print(f"    Warning: Transmorgrifier failed for {cell_ref}: {e}")
 
-                # Update cell value in the original cells list
-                # Find the cell in the original list and update it
+                # Update cell value in the original cells list with proper
+                # edit history so the Codex merge resolver won't revert it.
                 for original_cell in cells:
                     if get_cell_id(original_cell) == cell_id:
-                        original_cell['value'] = transcription
-                        codex_modified = True
-                        total_transcribed += 1
+                        if inject_cell_value(original_cell, transcription, author=edit_author):
+                            codex_modified = True
+                            total_transcribed += 1
                         break
 
                 # Heartbeat every 10 cells

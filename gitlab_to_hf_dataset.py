@@ -1104,12 +1104,20 @@ class GitLabDatasetDownloader:
     _UPLOAD_TIMEOUT = (30, 1800)
 
     # Number of retry attempts for transient LFS upload failures.
-    _UPLOAD_MAX_RETRIES = 3
+    # We use 7 retries because after paying for hours/days of GPU training,
+    # we should fight very hard to get the model uploaded.  With exponential
+    # backoff (10s base), the schedule is: 10s, 20s, 40s, 80s, 160s, 320s
+    # for a total of ~10 minutes of wait time across all retries.
+    _UPLOAD_MAX_RETRIES = 7
 
     # Base delay (seconds) for exponential backoff between upload retries.
-    _UPLOAD_BACKOFF_BASE = 5.0
+    _UPLOAD_BACKOFF_BASE = 10.0
 
-    def _upload_lfs_objects(self, objects: List[Dict]) -> Dict[str, Dict]:
+    def _upload_lfs_objects(
+        self,
+        objects: List[Dict],
+        heartbeat_callback: Optional[Callable[[str], None]] = None,
+    ) -> Dict[str, Dict]:
         """Upload objects to LFS storage using the batch API.
 
         Includes retry logic with exponential backoff for transient failures
@@ -1123,6 +1131,10 @@ class GitLabDatasetDownloader:
             objects: List of dicts with 'oid', 'size', and 'content_opener' keys.
                     content_opener is a callable that returns a context manager
                     yielding a file-like object.
+            heartbeat_callback: Optional callable that accepts a message string.
+                    Called between retry attempts (during the backoff sleep) to
+                    keep the monitor from considering the worker stale during
+                    long upload retry sequences.
 
         Returns:
             Dictionary mapping oid to upload result (success/error)
@@ -1160,6 +1172,12 @@ class GitLabDatasetDownloader:
                 backoff = self._UPLOAD_BACKOFF_BASE * (2 ** (attempt - 2))
                 print(f"    LFS upload retry {attempt}/{self._UPLOAD_MAX_RETRIES} "
                       f"for {len(pending_objects)} object(s) after {backoff:.0f}s backoff...")
+                # Send heartbeat so the monitor knows we're still alive
+                if heartbeat_callback:
+                    heartbeat_callback(
+                        f"LFS upload retry {attempt}/{self._UPLOAD_MAX_RETRIES} "
+                        f"for {len(pending_objects)} object(s)"
+                    )
                 time.sleep(backoff)
 
             # Request upload URLs for pending objects
@@ -1335,7 +1353,8 @@ class GitLabDatasetDownloader:
     def upload_batch(
         self,
         files: List[Dict[str, any]],
-        commit_message: Optional[str] = None
+        commit_message: Optional[str] = None,
+        heartbeat_callback: Optional[Callable[[str], None]] = None,
     ) -> Dict[str, any]:
         """Upload multiple files to GitLab in a single commit.
 
@@ -1350,6 +1369,9 @@ class GitLabDatasetDownloader:
         Args:
             files: List of file specifications
             commit_message: Optional commit message (auto-generated if not provided)
+            heartbeat_callback: Optional callable that accepts a message string.
+                    Passed through to LFS upload retries to keep the monitor
+                    from considering the worker stale during long uploads.
 
         Returns:
             Dictionary with:
@@ -1551,7 +1573,7 @@ class GitLabDatasetDownloader:
         # Upload LFS objects first
         if lfs_objects:
             try:
-                lfs_results = self._upload_lfs_objects(lfs_objects)
+                lfs_results = self._upload_lfs_objects(lfs_objects, heartbeat_callback=heartbeat_callback)
 
                 # Check for LFS upload failures
                 for obj in lfs_objects:

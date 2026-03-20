@@ -612,10 +612,13 @@ def _upload_checkpoint(
             project_id=str(job_context['project_id']),
         )
 
-        # Upload all files in a single batch commit
+        # Upload all files in a single batch commit.
+        # Pass a heartbeat callback so the monitor knows we're alive during
+        # long LFS upload retries (model checkpoints can take a while).
         result = uploader.upload_batch(
             files=files,
-            commit_message=f"Upload checkpoint and artifacts for job {job_id}"
+            commit_message=f"Upload checkpoint and artifacts for job {job_id}",
+            heartbeat_callback=lambda msg: callbacks.heartbeat(message=msg, stage="upload"),
         )
 
         if result['success']:

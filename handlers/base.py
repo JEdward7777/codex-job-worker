@@ -280,6 +280,79 @@ def cell_has_text(cell: Dict[str, Any]) -> bool:
     return bool(value and value.strip())
 
 
+def inject_cell_value(
+    cell: Dict[str, Any],
+    new_content: str,
+    author: str = "asr",
+    edit_type: str = "llm-generation",
+) -> bool:
+    """
+    Update a cell's value and add proper edit history so the Codex editor's
+    merge resolver won't revert the change.
+
+    See ``CODEX_EDIT_HISTORY.md`` for the full specification.  Key rules:
+
+    * ``editMap`` must be ``["value"]`` for cell content changes.
+    * ``value`` in the edit entry must exactly match the cell's ``value``.
+    * Timestamps are Unix milliseconds (``int(time.time() * 1000)``).
+    * When overwriting a cell that has no prior edit history, a backdated
+      ``"initial-import"`` entry is created for the old value first.
+
+    Args:
+        cell: The cell dict from the codex JSON structure.
+        new_content: The new content string to set.
+        author: Tool identifier for the edit history (e.g. ``"ASR facebook/w2v-bert-2.0"``).
+        edit_type: One of the Codex ``EditType`` values.  Defaults to
+            ``"llm-generation"`` which is appropriate for machine-generated
+            content such as ASR transcriptions.
+
+    Returns:
+        ``True`` if the cell was modified, ``False`` if the content was
+        unchanged and no edit was recorded.
+    """
+    import time as _time  # local import to avoid adding to module namespace
+
+    old_content = cell.get('value', '')
+
+    # Don't create edit history if content isn't changing
+    if old_content == new_content:
+        return False
+
+    # Update the cell value
+    cell['value'] = new_content
+
+    # Ensure metadata.edits exists
+    metadata = cell.setdefault('metadata', {})
+    edits = metadata.setdefault('edits', [])
+
+    timestamp_ms = int(_time.time() * 1000)
+
+    # If this cell had content but no edit history, record the old value first.
+    # This matches the pattern in codexDocument.ts updateCellContent() which
+    # creates a backdated initial-import entry for the previous value.
+    if len(edits) == 0 and old_content and old_content.strip():
+        edits.append({
+            'editMap': ['value'],
+            'value': old_content,
+            'timestamp': timestamp_ms - 1000,  # 1 second before the new edit
+            'type': 'initial-import',
+            'author': author,
+            'validatedBy': [],
+        })
+
+    # Add the new edit entry
+    edits.append({
+        'editMap': ['value'],
+        'value': new_content,
+        'timestamp': timestamp_ms,
+        'type': edit_type,
+        'author': author,
+        'validatedBy': [],
+    })
+
+    return True
+
+
 def get_cells_needing_audio(
     cells: List[Dict[str, Any]],
     include_verses: Optional[List[str]] = None,

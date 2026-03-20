@@ -29,6 +29,7 @@ from handlers.base import (
     get_cell_reference,
     get_cell_id,
     create_tar_archive,
+    inject_cell_value,
 )
 from gitlab_to_hf_dataset import GitLabDatasetDownloader
 
@@ -372,6 +373,7 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
             use_wav2vec2_base
         )
 
+        edit_author = f"ASR {os.path.basename(base_model)}"
         print(f"  Loaded model on {device}")
 
         # ============================================================
@@ -503,12 +505,13 @@ def run(job_context: Dict[str, Any], callbacks) -> Dict[str, Any]:
                     except Exception as e:
                         print(f"    Warning: Transmorgrifier failed for {cell_ref}: {e}")
 
-                # Update cell
+                # Update cell with proper edit history so the Codex merge
+                # resolver won't revert the transcription.
                 for original_cell in cells:
                     if get_cell_id(original_cell) == cell_id:
-                        original_cell['value'] = transcription
-                        codex_modified = True
-                        total_transcribed += 1
+                        if inject_cell_value(original_cell, transcription, author=edit_author):
+                            codex_modified = True
+                            total_transcribed += 1
                         break
 
                 if (idx + 1) % 10 == 0:
@@ -840,10 +843,13 @@ def _upload_model(
 
         print(f"    Uploading {len(files)} file(s) to GitLab...")
 
-        # Upload all files in a single batch commit
+        # Upload all files in a single batch commit.
+        # Pass a heartbeat callback so the monitor knows we're alive during
+        # long LFS upload retries (multi-GB model archives can take a while).
         result = uploader.upload_batch(
             files=files,
-            commit_message=f"Upload ASR model and artifacts for job {job_id}"
+            commit_message=f"Upload ASR model and artifacts for job {job_id}",
+            heartbeat_callback=lambda msg: callbacks.heartbeat(message=msg, stage="upload"),
         )
 
         # Clean up local archive

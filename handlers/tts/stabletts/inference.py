@@ -663,7 +663,8 @@ def _upload_audio_and_update_codex(
         callbacks.heartbeat(message=f"Uploading {len(files_to_upload)} files")
         result = uploader.upload_batch(
             files=files_to_upload,
-            commit_message=f"TTS inference results for job {job_id}"
+            commit_message=f"TTS inference results for job {job_id}",
+            heartbeat_callback=lambda msg: callbacks.heartbeat(message=msg, stage="upload"),
         )
 
         # Count audio files uploaded (exclude codex files)

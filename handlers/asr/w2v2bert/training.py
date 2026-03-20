@@ -708,10 +708,13 @@ def _upload_model(
 
         print(f"    Uploading {len(files)} file(s) to GitLab...")
 
-        # Upload all files in a single batch commit
+        # Upload all files in a single batch commit.
+        # Pass a heartbeat callback so the monitor knows we're alive during
+        # long LFS upload retries (multi-GB model archives can take a while).
         result = uploader.upload_batch(
             files=files,
-            commit_message=f"Upload ASR model and artifacts for job {job_id}"
+            commit_message=f"Upload ASR model and artifacts for job {job_id}",
+            heartbeat_callback=lambda msg: callbacks.heartbeat(message=msg, stage="upload"),
         )
 
         # Clean up local archive
