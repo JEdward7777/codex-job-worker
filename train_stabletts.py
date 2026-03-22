@@ -136,21 +136,47 @@ class SubsetWithLengths(Subset):
         # Preserve lengths for the subset indices
         self.lengths = [dataset.lengths[i] for i in indices]
 
-def split_dataset(dataset: StableDataset, val_split: float) -> Tuple[SubsetWithLengths, SubsetWithLengths]:
-    """Split dataset into train and validation sets while preserving lengths attribute"""
-    dataset_size = len(dataset)
+# Max mel length matching the upper bucket boundary used by DistributedBucketSampler.
+# Samples longer than this are silently dropped during training; we also exclude them
+# from validation so the two distributions stay consistent and to avoid quadratic
+# memory blowup in the [B, 1, T, T] attention mask.
+MAX_MEL_LENGTH = 1000
+
+# Validation batch size — kept small to limit peak GPU memory during the
+# quadratic attention-mask allocation ([B, 1, T, T]).
+VAL_BATCH_SIZE = 4
+
+
+def split_dataset(
+    dataset: StableDataset,
+    val_split: float,
+    max_mel_length: int = MAX_MEL_LENGTH,
+) -> Tuple[SubsetWithLengths, SubsetWithLengths, int]:
+    """Split dataset into train and validation sets while preserving lengths attribute.
+
+    Samples whose mel length exceeds *max_mel_length* are excluded from **both**
+    splits so that validation matches the effective training distribution (the
+    ``DistributedBucketSampler`` already drops them during training).
+
+    Returns:
+        (train_dataset, val_dataset, num_filtered) — the two subsets and the
+        count of samples that were removed because they exceeded *max_mel_length*.
+    """
+    # Filter out samples that exceed the max bucket boundary
+    valid_indices = [i for i in range(len(dataset)) if dataset.lengths[i] <= max_mel_length]
+    num_filtered = len(dataset) - len(valid_indices)
+
+    dataset_size = len(valid_indices)
     val_size = int(dataset_size * val_split)
     train_size = dataset_size - val_size
 
-    # Create indices for splitting
-    indices = list(range(dataset_size))
-    train_indices = indices[:train_size]
-    val_indices = indices[train_size:]
+    train_indices = valid_indices[:train_size]
+    val_indices = valid_indices[train_size:]
 
     train_dataset = SubsetWithLengths(dataset, train_indices)
     val_dataset = SubsetWithLengths(dataset, val_indices)
 
-    return train_dataset, val_dataset
+    return train_dataset, val_dataset, num_filtered
 
 def load_checkpoint(checkpoint_path: str, model: DDP, optimizer: optim.Optimizer, rank: int) -> int:
     """Load checkpoint from specific path"""
@@ -320,20 +346,26 @@ def train(rank, world_size, args):
     # Load full dataset with path resolution
     full_dataset = StableDatasetWrapper(args.train_dataset_path, mel_config.hop_length)
 
-    # Split into train and validation
-    train_dataset, val_dataset = split_dataset(full_dataset, args.val_split)
+    # Split into train and validation (also filters out samples > MAX_MEL_LENGTH)
+    bucket_boundaries = [32, 300, 400, 500, 600, 700, 800, 900, 1000]
+    train_dataset, val_dataset, num_filtered = split_dataset(
+        full_dataset, args.val_split, max_mel_length=bucket_boundaries[-1]
+    )
 
     if rank == 0:
         print("\nDataset split:")
         print(f"  Total samples: {len(full_dataset)}")
+        if num_filtered > 0:
+            print(f"  Filtered (mel > {bucket_boundaries[-1]} frames): {num_filtered}")
         print(f"  Training samples: {len(train_dataset)}")
         print(f"  Validation samples: {len(val_dataset)}")
+        print(f"  Validation batch size: {VAL_BATCH_SIZE}")
 
     # Create train dataloader with distributed sampler
     train_sampler = DistributedBucketSampler(
         train_dataset,
         args.batch_size,
-        [32, 300, 400, 500, 600, 700, 800, 900, 1000],
+        bucket_boundaries,
         num_replicas=world_size,
         rank=rank
     )
@@ -346,11 +378,22 @@ def train(rank, world_size, args):
         persistent_workers=True
     )
 
-    # Create validation dataloader (no distributed sampler needed for validation)
+    # Create validation dataloader with bucket sampling to group similar lengths
+    # together, reducing padding waste and preventing quadratic attention-mask
+    # memory blowup from mixing very long and very short sequences.
+    # Note: validation only runs on rank 0 (see validate()), so we use
+    # num_replicas=1, rank=0 to ensure the full val set is evaluated.
+    val_sampler = DistributedBucketSampler(
+        val_dataset,
+        VAL_BATCH_SIZE,
+        bucket_boundaries,
+        num_replicas=1,
+        rank=0,
+        shuffle=False,
+    )
     val_dataloader = DataLoader(
         val_dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
+        batch_sampler=val_sampler,
         num_workers=4,
         pin_memory=True,
         collate_fn=collate_fn,
