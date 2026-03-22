@@ -262,11 +262,11 @@ def count_active_jobs(
 # ---------------------------------------------------------------------------
 
 DEFAULT_ORPHAN_INSTANCES_FILE = 'orphan_instances.json'
-DEFAULT_ORPHAN_INSTANCE_HOURS = 2.0
+DEFAULT_ORPHAN_INSTANCE_HOURS = 12.0
 # How long a heartbeat must be stale before we consider the instance orphaned.
 # This is separate from claim_timeout_hours (which controls when a *job* is
 # re-claimable).  A shorter value here catches zombie instances faster.
-_HEARTBEAT_STALE_HOURS = 2.0
+_HEARTBEAT_STALE_HOURS = 12.0
 
 
 def _build_worker_job_map(
